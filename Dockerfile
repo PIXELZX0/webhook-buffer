@@ -12,7 +12,17 @@ RUN apt-get update \
  && cargo install --locked cargo-zigbuild@0.24.0 \
  && mkdir /data
 
-FROM toolchain AS build
+# 의존성은 플랫폼과 상관없이 한 번만 받는다. 플랫폼별 빌드가 레지스트리를 동시에 풀다가 부딪히지 않게 한다.
+FROM toolchain AS deps
+WORKDIR /src
+COPY Cargo.toml Cargo.lock ./
+RUN mkdir src \
+ && echo 'fn main() {}' > src/main.rs \
+ && touch src/lib.rs \
+ && cargo fetch --locked \
+ && rm -rf src
+
+FROM deps AS build
 ARG TARGETPLATFORM
 # musl로 정적 링크해서 어떤 베이스 이미지에서도 돌게 한다.
 # s390x는 musl용 Rust 표준 라이브러리가 배포되지 않아서 glibc로 빌드한다.
@@ -30,12 +40,9 @@ RUN case "$TARGETPLATFORM" in \
     esac > /zig-target \
  && cut -d. -f1 /zig-target > /rust-target \
  && rustup target add "$(cat /rust-target)"
-WORKDIR /src
-COPY Cargo.toml Cargo.lock ./
 COPY src ./src
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/src/target,id=target-$TARGETPLATFORM \
-    cargo zigbuild --release --locked --target "$(cat /zig-target)" \
+RUN --mount=type=cache,target=/src/target,id=target-$TARGETPLATFORM \
+    cargo zigbuild --release --locked --offline --target "$(cat /zig-target)" \
  && cp "target/$(cat /rust-target)/release/webhook-buffer" /webhook-buffer
 
 # 정적 바이너리라 아무것도 없는 scratch로 충분하다. s390x만 glibc가 들어 있는 베이스를 쓴다.
