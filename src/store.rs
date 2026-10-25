@@ -1,5 +1,5 @@
-//! 전달에 실패한 웹훅을 SQLite에 보관한다.
-//! 프로세스가 재시작돼도 아직 전달하지 못한 웹훅이 사라지지 않도록 디스크에 둔다.
+//! 엔드포인트, 목적지, 받은 웹훅, 목적지별 전달 상태를 SQLite에 보관한다.
+//! 받은 웹훅은 전달하기 전에 먼저 디스크에 저장하므로 프로세스가 죽어도 잃어버리지 않는다.
 
 use std::{
     path::Path,
@@ -9,23 +9,102 @@ use std::{
 
 use anyhow::{Context, Result};
 use bytes::Bytes;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, Row, params};
+use serde::Serialize;
 
 /// 목적지로 보낼 웹훅 한 건
 #[derive(Debug, Clone)]
 pub struct Webhook {
     pub method: String,
-    /// 경로 + 쿼리 (예: `/github/events?x=1`)
+    /// `/h/{slug}` 뒤에 붙어 온 경로와 쿼리 (예: `/push?x=1`, 없으면 빈 문자열)
     pub path_and_query: String,
     pub headers: Vec<(String, Vec<u8>)>,
     pub body: Bytes,
 }
 
-#[derive(Debug, Clone)]
-pub struct StoredWebhook {
+#[derive(Debug, Clone, Serialize)]
+pub struct Endpoint {
     pub id: i64,
+    pub name: String,
+    pub slug: String,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Destination {
+    pub id: i64,
+    pub endpoint_id: i64,
+    pub url: String,
+    pub enabled: bool,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct EndpointSummary {
+    #[serde(flatten)]
+    pub endpoint: Endpoint,
+    pub destinations: Vec<Destination>,
+    pub event_count: i64,
+    pub pending_count: i64,
+    pub last_received_at: Option<i64>,
+}
+
+/// 재시도 작업이 처리할 전달 한 건
+#[derive(Debug, Clone)]
+pub struct Job {
+    pub delivery_id: i64,
     pub attempts: u32,
+    pub url: String,
     pub webhook: Webhook,
+}
+
+#[derive(Debug, Serialize)]
+pub struct EventSummary {
+    pub id: i64,
+    pub endpoint_id: i64,
+    pub endpoint_name: String,
+    pub method: String,
+    pub path: String,
+    pub received_at: i64,
+    pub body_size: i64,
+    pub delivered: i64,
+    pub pending: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DeliveryInfo {
+    pub id: i64,
+    pub event_id: i64,
+    pub endpoint_name: String,
+    pub destination_id: i64,
+    pub url: String,
+    pub state: String,
+    pub attempts: u32,
+    pub last_status: Option<u16>,
+    pub last_error: Option<String>,
+    pub next_attempt_at: Option<i64>,
+    pub delivered_at: Option<i64>,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct EventDetail {
+    #[serde(flatten)]
+    pub summary: EventSummary,
+    pub headers: Vec<(String, String)>,
+    pub body: String,
+    pub deliveries: Vec<DeliveryInfo>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct Stats {
+    pub endpoints: i64,
+    pub destinations: i64,
+    pub events_24h: i64,
+    pub delivered_24h: i64,
+    pub pending: i64,
+    /// 한 번 이상 실패해서 재시도를 기다리는 전달 수
+    pub retrying: i64,
 }
 
 #[derive(Clone)]
@@ -48,18 +127,46 @@ impl Store {
         conn.execute_batch(
             "PRAGMA journal_mode = WAL;
              PRAGMA synchronous = FULL;
-             CREATE TABLE IF NOT EXISTS webhooks (
+             PRAGMA foreign_keys = ON;
+             CREATE TABLE IF NOT EXISTS endpoints (
+                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                 name       TEXT    NOT NULL,
+                 slug       TEXT    NOT NULL UNIQUE,
+                 created_at INTEGER NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS destinations (
+                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                 endpoint_id INTEGER NOT NULL REFERENCES endpoints(id) ON DELETE CASCADE,
+                 url         TEXT    NOT NULL,
+                 enabled     INTEGER NOT NULL DEFAULT 1,
+                 created_at  INTEGER NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS events (
+                 id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                 endpoint_id    INTEGER NOT NULL REFERENCES endpoints(id) ON DELETE CASCADE,
+                 method         TEXT    NOT NULL,
+                 path_and_query TEXT    NOT NULL,
+                 headers        BLOB    NOT NULL,
+                 body           BLOB    NOT NULL,
+                 received_at    INTEGER NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS deliveries (
                  id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                 method          TEXT    NOT NULL,
-                 path_and_query  TEXT    NOT NULL,
-                 headers         BLOB    NOT NULL,
-                 body            BLOB    NOT NULL,
+                 event_id        INTEGER NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+                 destination_id  INTEGER NOT NULL REFERENCES destinations(id) ON DELETE CASCADE,
+                 state           TEXT    NOT NULL DEFAULT 'pending',
                  attempts        INTEGER NOT NULL DEFAULT 0,
-                 next_attempt_at INTEGER NOT NULL,
+                 next_attempt_at INTEGER,
+                 last_status     INTEGER,
                  last_error      TEXT,
+                 delivered_at    INTEGER,
                  created_at      INTEGER NOT NULL
              );
-             CREATE INDEX IF NOT EXISTS idx_webhooks_next ON webhooks (next_attempt_at, id);",
+             CREATE INDEX IF NOT EXISTS idx_destinations_endpoint ON destinations (endpoint_id);
+             CREATE INDEX IF NOT EXISTS idx_events_endpoint ON events (endpoint_id, id);
+             CREATE INDEX IF NOT EXISTS idx_deliveries_event ON deliveries (event_id);
+             CREATE INDEX IF NOT EXISTS idx_deliveries_destination ON deliveries (destination_id);
+             CREATE INDEX IF NOT EXISTS idx_deliveries_due ON deliveries (state, next_attempt_at);",
         )?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
@@ -79,103 +186,524 @@ impl Store {
         .await?
     }
 
-    /// 실패한 웹훅을 저장한다. `next_attempt_at`(unix ms) 이후에 재시도된다.
-    pub async fn insert(
+    // ---------- 엔드포인트 / 목적지 ----------
+
+    pub async fn create_endpoint(&self, name: String, slug: String) -> Result<Endpoint> {
+        self.with_conn(move |c| {
+            let created_at = now_ms();
+            c.execute(
+                "INSERT INTO endpoints (name, slug, created_at) VALUES (?1, ?2, ?3)",
+                params![name, slug, created_at],
+            )?;
+            Ok(Endpoint {
+                id: c.last_insert_rowid(),
+                name,
+                slug,
+                created_at,
+            })
+        })
+        .await
+    }
+
+    pub async fn slug_exists(&self, slug: String) -> Result<bool> {
+        self.with_conn(move |c| {
+            c.query_row(
+                "SELECT 1 FROM endpoints WHERE slug = ?1",
+                [slug],
+                |_| Ok(()),
+            )
+            .optional()
+            .map(|r| r.is_some())
+        })
+        .await
+    }
+
+    pub async fn delete_endpoint(&self, id: i64) -> Result<bool> {
+        self.with_conn(move |c| {
+            c.execute("DELETE FROM endpoints WHERE id = ?1", [id])
+                .map(|n| n > 0)
+        })
+        .await
+    }
+
+    pub async fn list_endpoints(&self) -> Result<Vec<EndpointSummary>> {
+        self.with_conn(|c| {
+            let mut endpoints = c
+                .prepare(
+                    "SELECT ep.id, ep.name, ep.slug, ep.created_at,
+                        (SELECT COUNT(*) FROM events WHERE endpoint_id = ep.id),
+                        (SELECT COUNT(*) FROM deliveries d JOIN events e ON e.id = d.event_id
+                          WHERE e.endpoint_id = ep.id AND d.state = 'pending'),
+                        (SELECT MAX(received_at) FROM events WHERE endpoint_id = ep.id)
+                     FROM endpoints ep ORDER BY ep.id",
+                )?
+                .query_map([], |r| {
+                    Ok(EndpointSummary {
+                        endpoint: Endpoint {
+                            id: r.get(0)?,
+                            name: r.get(1)?,
+                            slug: r.get(2)?,
+                            created_at: r.get(3)?,
+                        },
+                        destinations: Vec::new(),
+                        event_count: r.get(4)?,
+                        pending_count: r.get(5)?,
+                        last_received_at: r.get(6)?,
+                    })
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+
+            let destinations = c
+                .prepare(
+                    "SELECT id, endpoint_id, url, enabled, created_at FROM destinations ORDER BY id",
+                )?
+                .query_map([], destination_from_row)?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            for d in destinations {
+                if let Some(ep) = endpoints.iter_mut().find(|e| e.endpoint.id == d.endpoint_id) {
+                    ep.destinations.push(d);
+                }
+            }
+            Ok(endpoints)
+        })
+        .await
+    }
+
+    /// 슬러그로 엔드포인트와 켜져 있는 목적지들을 찾는다.
+    pub async fn endpoint_by_slug(&self, slug: String) -> Result<Option<(Endpoint, Vec<i64>)>> {
+        self.with_conn(move |c| {
+            let Some(endpoint) = c
+                .query_row(
+                    "SELECT id, name, slug, created_at FROM endpoints WHERE slug = ?1",
+                    [slug],
+                    |r| {
+                        Ok(Endpoint {
+                            id: r.get(0)?,
+                            name: r.get(1)?,
+                            slug: r.get(2)?,
+                            created_at: r.get(3)?,
+                        })
+                    },
+                )
+                .optional()?
+            else {
+                return Ok(None);
+            };
+            let destination_ids = c
+                .prepare("SELECT id FROM destinations WHERE endpoint_id = ?1 AND enabled = 1")?
+                .query_map([endpoint.id], |r| r.get(0))?
+                .collect::<rusqlite::Result<Vec<i64>>>()?;
+            Ok(Some((endpoint, destination_ids)))
+        })
+        .await
+    }
+
+    /// 목적지를 추가한다. 엔드포인트가 없으면 `None`.
+    pub async fn add_destination(
         &self,
-        webhook: Webhook,
-        attempts: u32,
-        next_attempt_at: i64,
-        error: String,
-    ) -> Result<i64> {
+        endpoint_id: i64,
+        url: String,
+    ) -> Result<Option<Destination>> {
+        self.with_conn(move |c| {
+            let exists = c
+                .query_row(
+                    "SELECT 1 FROM endpoints WHERE id = ?1",
+                    [endpoint_id],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some();
+            if !exists {
+                return Ok(None);
+            }
+            let created_at = now_ms();
+            c.execute(
+                "INSERT INTO destinations (endpoint_id, url, created_at) VALUES (?1, ?2, ?3)",
+                params![endpoint_id, url, created_at],
+            )?;
+            Ok(Some(Destination {
+                id: c.last_insert_rowid(),
+                endpoint_id,
+                url,
+                enabled: true,
+                created_at,
+            }))
+        })
+        .await
+    }
+
+    pub async fn set_destination_enabled(&self, id: i64, enabled: bool) -> Result<bool> {
         self.with_conn(move |c| {
             c.execute(
-                "INSERT INTO webhooks
-                    (method, path_and_query, headers, body, attempts, next_attempt_at, last_error, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                "UPDATE destinations SET enabled = ?2 WHERE id = ?1",
+                params![id, enabled],
+            )
+            .map(|n| n > 0)
+        })
+        .await
+    }
+
+    pub async fn delete_destination(&self, id: i64) -> Result<bool> {
+        self.with_conn(move |c| {
+            c.execute("DELETE FROM destinations WHERE id = ?1", [id])
+                .map(|n| n > 0)
+        })
+        .await
+    }
+
+    // ---------- 웹훅 수신 / 전달 ----------
+
+    /// 받은 웹훅을 저장하고, 목적지마다 바로 보낼 전달 작업을 만든다.
+    pub async fn insert_event(
+        &self,
+        endpoint_id: i64,
+        webhook: Webhook,
+        destination_ids: Vec<i64>,
+    ) -> Result<i64> {
+        self.with_conn(move |c| {
+            let tx = c.unchecked_transaction()?;
+            let now = now_ms();
+            tx.execute(
+                "INSERT INTO events (endpoint_id, method, path_and_query, headers, body, received_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 params![
+                    endpoint_id,
                     webhook.method,
                     webhook.path_and_query,
                     encode_headers(&webhook.headers),
                     webhook.body.as_ref(),
-                    attempts,
-                    next_attempt_at,
-                    error,
-                    now_ms(),
+                    now,
                 ],
             )?;
-            Ok(c.last_insert_rowid())
+            let event_id = tx.last_insert_rowid();
+            insert_deliveries(&tx, event_id, &destination_ids, now)?;
+            tx.commit()?;
+            Ok(event_id)
         })
         .await
     }
 
-    /// 재시도 시각이 된 웹훅 중 가장 오래된 것부터 가져온다.
-    pub async fn due(&self, now: i64, limit: usize) -> Result<Vec<StoredWebhook>> {
+    /// 이미 받은 웹훅을 현재 켜져 있는 목적지 전체로 다시 보낸다. 웹훅이 없으면 `None`.
+    pub async fn replay_event(&self, event_id: i64) -> Result<Option<usize>> {
         self.with_conn(move |c| {
-            let mut stmt = c.prepare(
-                "SELECT id, attempts, method, path_and_query, headers, body
-                 FROM webhooks
-                 WHERE next_attempt_at <= ?1
-                 ORDER BY next_attempt_at, id
-                 LIMIT ?2",
-            )?;
-            let rows = stmt.query_map(params![now, limit as i64], |row| {
-                Ok(StoredWebhook {
-                    id: row.get(0)?,
-                    attempts: row.get(1)?,
-                    webhook: Webhook {
-                        method: row.get(2)?,
-                        path_and_query: row.get(3)?,
-                        headers: decode_headers(&row.get::<_, Vec<u8>>(4)?),
-                        body: Bytes::from(row.get::<_, Vec<u8>>(5)?),
-                    },
-                })
-            })?;
-            rows.collect()
+            let Some(endpoint_id) = c
+                .query_row(
+                    "SELECT endpoint_id FROM events WHERE id = ?1",
+                    [event_id],
+                    |r| r.get::<_, i64>(0),
+                )
+                .optional()?
+            else {
+                return Ok(None);
+            };
+            let destination_ids = c
+                .prepare("SELECT id FROM destinations WHERE endpoint_id = ?1 AND enabled = 1")?
+                .query_map([endpoint_id], |r| r.get(0))?
+                .collect::<rusqlite::Result<Vec<i64>>>()?;
+            let tx = c.unchecked_transaction()?;
+            insert_deliveries(&tx, event_id, &destination_ids, now_ms())?;
+            tx.commit()?;
+            Ok(Some(destination_ids.len()))
         })
         .await
     }
 
-    /// 다음 재시도 예정 시각 (저장된 웹훅이 없으면 `None`)
-    pub async fn next_attempt_at(&self) -> Result<Option<i64>> {
+    /// 보낼 시각이 된 전달을 가져오면서 `lease_until`까지 다른 쪽에서 다시 집어가지 않도록 잡아 둔다.
+    pub async fn claim_due(&self, now: i64, limit: usize, lease_until: i64) -> Result<Vec<Job>> {
+        self.with_conn(move |c| {
+            let tx = c.unchecked_transaction()?;
+            let jobs = tx
+                .prepare(
+                    "SELECT d.id, d.attempts, dst.url, e.method, e.path_and_query, e.headers, e.body
+                     FROM deliveries d
+                     JOIN destinations dst ON dst.id = d.destination_id
+                     JOIN events e ON e.id = d.event_id
+                     WHERE d.state = 'pending' AND dst.enabled = 1 AND d.next_attempt_at <= ?1
+                     ORDER BY d.next_attempt_at, d.id
+                     LIMIT ?2",
+                )?
+                .query_map(params![now, limit as i64], |r| {
+                    Ok(Job {
+                        delivery_id: r.get(0)?,
+                        attempts: r.get(1)?,
+                        url: r.get(2)?,
+                        webhook: Webhook {
+                            method: r.get(3)?,
+                            path_and_query: r.get(4)?,
+                            headers: decode_headers(&r.get::<_, Vec<u8>>(5)?),
+                            body: Bytes::from(r.get::<_, Vec<u8>>(6)?),
+                        },
+                    })
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            {
+                let mut lease =
+                    tx.prepare("UPDATE deliveries SET next_attempt_at = ?2 WHERE id = ?1")?;
+                for job in &jobs {
+                    lease.execute(params![job.delivery_id, lease_until])?;
+                }
+            }
+            tx.commit()?;
+            Ok(jobs)
+        })
+        .await
+    }
+
+    /// 다음으로 보낼 전달의 예정 시각 (보낼 것이 없으면 `None`)
+    pub async fn next_due(&self) -> Result<Option<i64>> {
         self.with_conn(|c| {
-            c.query_row("SELECT MIN(next_attempt_at) FROM webhooks", [], |r| {
-                r.get(0)
-            })
-            .optional()
-            .map(Option::flatten)
+            c.query_row(
+                "SELECT MIN(d.next_attempt_at) FROM deliveries d
+                 JOIN destinations dst ON dst.id = d.destination_id
+                 WHERE d.state = 'pending' AND dst.enabled = 1",
+                [],
+                |r| r.get(0),
+            )
         })
         .await
     }
 
-    pub async fn delete(&self, id: i64) -> Result<()> {
-        self.with_conn(move |c| {
-            c.execute("DELETE FROM webhooks WHERE id = ?1", [id])
-                .map(drop)
-        })
-        .await
-    }
-
-    pub async fn reschedule(
-        &self,
-        id: i64,
-        attempts: u32,
-        next_attempt_at: i64,
-        error: String,
-    ) -> Result<()> {
+    pub async fn mark_delivered(&self, id: i64, attempts: u32, status: u16) -> Result<()> {
         self.with_conn(move |c| {
             c.execute(
-                "UPDATE webhooks SET attempts = ?2, next_attempt_at = ?3, last_error = ?4 WHERE id = ?1",
-                params![id, attempts, next_attempt_at, error],
+                "UPDATE deliveries
+                 SET state = 'delivered', attempts = ?2, last_status = ?3, last_error = NULL,
+                     next_attempt_at = NULL, delivered_at = ?4
+                 WHERE id = ?1",
+                params![id, attempts, status, now_ms()],
             )
             .map(drop)
         })
         .await
     }
 
-    pub async fn pending_count(&self) -> Result<i64> {
-        self.with_conn(|c| c.query_row("SELECT COUNT(*) FROM webhooks", [], |r| r.get(0)))
-            .await
+    pub async fn mark_failed(
+        &self,
+        id: i64,
+        attempts: u32,
+        next_attempt_at: i64,
+        status: Option<u16>,
+        error: String,
+    ) -> Result<()> {
+        self.with_conn(move |c| {
+            c.execute(
+                "UPDATE deliveries
+                 SET attempts = ?2, next_attempt_at = ?3, last_status = ?4, last_error = ?5
+                 WHERE id = ?1 AND state = 'pending'",
+                params![id, attempts, next_attempt_at, status, error],
+            )
+            .map(drop)
+        })
+        .await
     }
+
+    /// 대기 중인 전달을 지금 바로 다시 보내도록 한다.
+    pub async fn retry_now(&self, id: i64) -> Result<bool> {
+        self.with_conn(move |c| {
+            c.execute(
+                "UPDATE deliveries SET next_attempt_at = ?2 WHERE id = ?1 AND state = 'pending'",
+                params![id, now_ms()],
+            )
+            .map(|n| n > 0)
+        })
+        .await
+    }
+
+    /// 대기 중인 전달을 포기하고 지운다.
+    pub async fn delete_delivery(&self, id: i64) -> Result<bool> {
+        self.with_conn(move |c| {
+            c.execute(
+                "DELETE FROM deliveries WHERE id = ?1 AND state = 'pending'",
+                [id],
+            )
+            .map(|n| n > 0)
+        })
+        .await
+    }
+
+    // ---------- 패널용 조회 ----------
+
+    pub async fn list_events(
+        &self,
+        endpoint_id: Option<i64>,
+        before: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<EventSummary>> {
+        self.with_conn(move |c| {
+            c.prepare(&format!(
+                "{EVENT_SUMMARY_SELECT}
+                 WHERE (?1 IS NULL OR e.endpoint_id = ?1) AND (?2 IS NULL OR e.id < ?2)
+                 ORDER BY e.id DESC LIMIT ?3"
+            ))?
+            .query_map(
+                params![endpoint_id, before, limit as i64],
+                event_summary_from_row,
+            )?
+            .collect()
+        })
+        .await
+    }
+
+    pub async fn get_event(&self, id: i64) -> Result<Option<EventDetail>> {
+        self.with_conn(move |c| {
+            let Some((summary, headers, body)) = c
+                .query_row(
+                    &format!("{EVENT_SUMMARY_SELECT} WHERE e.id = ?1"),
+                    [id],
+                    |r| {
+                        Ok((
+                            event_summary_from_row(r)?,
+                            r.get::<_, Vec<u8>>(9)?,
+                            r.get::<_, Vec<u8>>(10)?,
+                        ))
+                    },
+                )
+                .optional()?
+            else {
+                return Ok(None);
+            };
+            let deliveries = c
+                .prepare(&format!(
+                    "{DELIVERY_SELECT} WHERE d.event_id = ?1 ORDER BY d.id"
+                ))?
+                .query_map([id], delivery_from_row)?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(Some(EventDetail {
+                summary,
+                headers: decode_headers(&headers)
+                    .into_iter()
+                    .map(|(k, v)| (k, String::from_utf8_lossy(&v).into_owned()))
+                    .collect(),
+                body: String::from_utf8_lossy(&body).into_owned(),
+                deliveries,
+            }))
+        })
+        .await
+    }
+
+    pub async fn list_pending(&self, limit: usize) -> Result<Vec<DeliveryInfo>> {
+        self.with_conn(move |c| {
+            c.prepare(&format!(
+                "{DELIVERY_SELECT} WHERE d.state = 'pending'
+                 ORDER BY d.next_attempt_at, d.id LIMIT ?1"
+            ))?
+            .query_map([limit as i64], delivery_from_row)?
+            .collect()
+        })
+        .await
+    }
+
+    pub async fn stats(&self) -> Result<Stats> {
+        self.with_conn(|c| {
+            let since = now_ms() - 24 * 60 * 60 * 1000;
+            c.query_row(
+                "SELECT
+                    (SELECT COUNT(*) FROM endpoints),
+                    (SELECT COUNT(*) FROM destinations),
+                    (SELECT COUNT(*) FROM events WHERE received_at >= ?1),
+                    (SELECT COUNT(*) FROM deliveries WHERE state = 'delivered' AND delivered_at >= ?1),
+                    (SELECT COUNT(*) FROM deliveries WHERE state = 'pending'),
+                    (SELECT COUNT(*) FROM deliveries WHERE state = 'pending' AND attempts > 0)",
+                [since],
+                |r| {
+                    Ok(Stats {
+                        endpoints: r.get(0)?,
+                        destinations: r.get(1)?,
+                        events_24h: r.get(2)?,
+                        delivered_24h: r.get(3)?,
+                        pending: r.get(4)?,
+                        retrying: r.get(5)?,
+                    })
+                },
+            )
+        })
+        .await
+    }
+
+    /// `cutoff`보다 오래됐고 더 보낼 것이 없는 웹훅 기록을 지운다.
+    pub async fn prune(&self, cutoff: i64) -> Result<usize> {
+        self.with_conn(move |c| {
+            c.execute(
+                "DELETE FROM events WHERE received_at < ?1
+                 AND NOT EXISTS (SELECT 1 FROM deliveries d WHERE d.event_id = events.id AND d.state = 'pending')",
+                [cutoff],
+            )
+        })
+        .await
+    }
+}
+
+const EVENT_SUMMARY_SELECT: &str =
+    "SELECT e.id, e.endpoint_id, ep.name, e.method, e.path_and_query,
+        e.received_at, length(e.body),
+        (SELECT COUNT(*) FROM deliveries WHERE event_id = e.id AND state = 'delivered'),
+        (SELECT COUNT(*) FROM deliveries WHERE event_id = e.id AND state = 'pending'),
+        e.headers, e.body
+     FROM events e JOIN endpoints ep ON ep.id = e.endpoint_id";
+
+const DELIVERY_SELECT: &str =
+    "SELECT d.id, d.event_id, ep.name, d.destination_id, dst.url, d.state,
+        d.attempts, d.last_status, d.last_error, d.next_attempt_at, d.delivered_at, d.created_at
+     FROM deliveries d
+     JOIN destinations dst ON dst.id = d.destination_id
+     JOIN events e ON e.id = d.event_id
+     JOIN endpoints ep ON ep.id = e.endpoint_id";
+
+fn insert_deliveries(
+    c: &Connection,
+    event_id: i64,
+    destination_ids: &[i64],
+    now: i64,
+) -> rusqlite::Result<()> {
+    let mut stmt = c.prepare(
+        "INSERT INTO deliveries (event_id, destination_id, next_attempt_at, created_at)
+         VALUES (?1, ?2, ?3, ?3)",
+    )?;
+    for id in destination_ids {
+        stmt.execute(params![event_id, id, now])?;
+    }
+    Ok(())
+}
+
+fn destination_from_row(r: &Row) -> rusqlite::Result<Destination> {
+    Ok(Destination {
+        id: r.get(0)?,
+        endpoint_id: r.get(1)?,
+        url: r.get(2)?,
+        enabled: r.get(3)?,
+        created_at: r.get(4)?,
+    })
+}
+
+fn event_summary_from_row(r: &Row) -> rusqlite::Result<EventSummary> {
+    Ok(EventSummary {
+        id: r.get(0)?,
+        endpoint_id: r.get(1)?,
+        endpoint_name: r.get(2)?,
+        method: r.get(3)?,
+        path: r.get(4)?,
+        received_at: r.get(5)?,
+        body_size: r.get(6)?,
+        delivered: r.get(7)?,
+        pending: r.get(8)?,
+    })
+}
+
+fn delivery_from_row(r: &Row) -> rusqlite::Result<DeliveryInfo> {
+    Ok(DeliveryInfo {
+        id: r.get(0)?,
+        event_id: r.get(1)?,
+        endpoint_name: r.get(2)?,
+        destination_id: r.get(3)?,
+        url: r.get(4)?,
+        state: r.get(5)?,
+        attempts: r.get(6)?,
+        last_status: r.get(7)?,
+        last_error: r.get(8)?,
+        next_attempt_at: r.get(9)?,
+        delivered_at: r.get(10)?,
+        created_at: r.get(11)?,
+    })
 }
 
 pub fn now_ms() -> i64 {
@@ -219,5 +747,68 @@ mod tests {
             ("x-empty".to_string(), Vec::new()),
         ];
         assert_eq!(decode_headers(&encode_headers(&headers)), headers);
+    }
+
+    fn webhook() -> Webhook {
+        Webhook {
+            method: "POST".into(),
+            path_and_query: String::new(),
+            headers: vec![],
+            body: Bytes::from_static(b"x"),
+        }
+    }
+
+    #[tokio::test]
+    async fn claim_leases_jobs_and_skips_disabled_destinations() {
+        let store = Store::open_in_memory().unwrap();
+        let ep = store.create_endpoint("a".into(), "a".into()).await.unwrap();
+        let d1 = store
+            .add_destination(ep.id, "http://one".into())
+            .await
+            .unwrap()
+            .unwrap();
+        let d2 = store
+            .add_destination(ep.id, "http://two".into())
+            .await
+            .unwrap()
+            .unwrap();
+        store
+            .insert_event(ep.id, webhook(), vec![d1.id, d2.id])
+            .await
+            .unwrap();
+        store.set_destination_enabled(d2.id, false).await.unwrap();
+
+        let now = now_ms();
+        let jobs = store.claim_due(now, 10, now + 60_000).await.unwrap();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].url, "http://one");
+        // 잡아 둔 작업은 다시 나오지 않는다
+        assert!(
+            store
+                .claim_due(now, 10, now + 60_000)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn prune_keeps_events_with_pending_deliveries() {
+        let store = Store::open_in_memory().unwrap();
+        let ep = store.create_endpoint("a".into(), "a".into()).await.unwrap();
+        let d = store
+            .add_destination(ep.id, "http://one".into())
+            .await
+            .unwrap()
+            .unwrap();
+        let pending = store
+            .insert_event(ep.id, webhook(), vec![d.id])
+            .await
+            .unwrap();
+        let done = store.insert_event(ep.id, webhook(), vec![]).await.unwrap();
+
+        assert_eq!(store.prune(now_ms() + 1).await.unwrap(), 1);
+        assert!(store.get_event(pending).await.unwrap().is_some());
+        assert!(store.get_event(done).await.unwrap().is_none());
     }
 }

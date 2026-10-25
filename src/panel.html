@@ -1,0 +1,519 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Webhook Buffer</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #fff; --text: #1d2330; --muted: #6b7280; --border: #e3e6eb;
+    --accent: #2563eb; --accent-text: #fff; --ok: #15803d; --ok-bg: #dcfce7;
+    --warn: #b45309; --warn-bg: #fef3c7; --bad: #b91c1c; --bad-bg: #fee2e2; --code: #f1f3f6;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1218; --panel: #171b23; --text: #e5e7eb; --muted: #9aa3b2; --border: #2a303b;
+      --accent: #3b82f6; --ok: #4ade80; --ok-bg: #14301f; --warn: #fbbf24; --warn-bg: #3a2c0b;
+      --bad: #f87171; --bad-bg: #3b1515; --code: #10141a;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 14px/1.5 system-ui, -apple-system, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif; }
+  header { display: flex; align-items: center; justify-content: space-between;
+           padding: 14px 24px; background: var(--panel); border-bottom: 1px solid var(--border); }
+  header h1 { font-size: 17px; margin: 0; }
+  main { max-width: 1100px; margin: 0 auto; padding: 20px 16px 60px; }
+  button, input, select { font: inherit; color: inherit; }
+  input, select { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 7px 10px; }
+  input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  button { border: 1px solid var(--border); background: var(--panel); border-radius: 6px;
+           padding: 6px 12px; cursor: pointer; white-space: nowrap; }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+  button.danger { color: var(--bad); }
+  button.small { padding: 3px 8px; font-size: 12px; }
+  .muted { color: var(--muted); }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 20px; }
+  .stat { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
+  .stat .label { color: var(--muted); font-size: 12.5px; }
+  .stat .value { font-size: 24px; font-weight: 600; margin-top: 2px; font-variant-numeric: tabular-nums; }
+  .stat.warn .value { color: var(--warn); }
+  .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin-bottom: 16px; }
+  .tabs button { border: none; background: none; border-bottom: 2px solid transparent; border-radius: 0; padding: 8px 14px; color: var(--muted); }
+  .tabs button.active { color: var(--text); border-bottom-color: var(--accent); font-weight: 600; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px; margin-bottom: 12px; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .row.between { justify-content: space-between; }
+  .grow { flex: 1; min-width: 180px; }
+  .endpoint-head h3 { margin: 0; font-size: 15px; }
+  .url { display: flex; gap: 6px; align-items: center; margin: 8px 0 12px; background: var(--code);
+         border-radius: 6px; padding: 6px 6px 6px 10px; overflow: hidden; }
+  .url span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .dest { display: flex; gap: 8px; align-items: center; padding: 7px 0; border-top: 1px solid var(--border); }
+  .dest .mono { flex: 1; overflow-wrap: anywhere; }
+  .dest.off .mono { color: var(--muted); text-decoration: line-through; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { color: var(--muted); font-weight: 500; font-size: 12.5px; white-space: nowrap; }
+  tbody tr.click { cursor: pointer; }
+  tbody tr.click:hover { background: var(--code); }
+  .table-wrap { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; overflow-x: auto; }
+  .badge { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; font-weight: 500; white-space: nowrap; }
+  .badge.ok { background: var(--ok-bg); color: var(--ok); }
+  .badge.warn { background: var(--warn-bg); color: var(--warn); }
+  .badge.bad { background: var(--bad-bg); color: var(--bad); }
+  .badge.none { background: var(--code); color: var(--muted); }
+  .empty { text-align: center; color: var(--muted); padding: 30px; }
+  .error-text { color: var(--bad); font-size: 13px; }
+  pre { background: var(--code); border-radius: 6px; padding: 10px; overflow: auto; max-height: 340px;
+        margin: 6px 0 14px; white-space: pre-wrap; word-break: break-all; }
+  dialog { border: 1px solid var(--border); border-radius: 12px; background: var(--panel); color: var(--text);
+           width: min(900px, calc(100vw - 32px)); max-height: calc(100vh - 48px); padding: 20px; }
+  dialog::backdrop { background: rgba(0,0,0,.45); }
+  dialog h2 { margin: 0; font-size: 16px; }
+  dialog h4 { margin: 14px 0 4px; font-size: 13px; color: var(--muted); font-weight: 500; }
+  #login { max-width: 380px; margin: 12vh auto; }
+  #login h2 { margin-top: 0; }
+  .toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: var(--text);
+           color: var(--bg); padding: 8px 16px; border-radius: 8px; opacity: 0; transition: opacity .2s; pointer-events: none; }
+  .toast.show { opacity: 1; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Webhook Buffer</h1>
+  <button id="logout" class="small" hidden>로그아웃</button>
+</header>
+
+<main>
+  <div id="login" class="card" hidden>
+    <h2>관리자 토큰</h2>
+    <p class="muted">서버의 <span class="mono">ADMIN_TOKEN</span> 값을 입력하세요. 설정하지 않았다면 서버 로그에 임시 토큰이 찍혀 있습니다.</p>
+    <form id="login-form" class="row">
+      <input id="token-input" type="password" class="grow" placeholder="토큰" autocomplete="current-password" required>
+      <button class="primary">들어가기</button>
+    </form>
+    <p id="login-error" class="error-text"></p>
+  </div>
+
+  <div id="app" hidden>
+    <section class="stats" id="stats"></section>
+
+    <nav class="tabs">
+      <button data-tab="endpoints" class="active">엔드포인트</button>
+      <button data-tab="events">최근 웹훅</button>
+      <button data-tab="queue">재시도 대기열</button>
+    </nav>
+
+    <section id="tab-endpoints">
+      <form id="new-endpoint" class="card row">
+        <input name="name" class="grow" placeholder="엔드포인트 이름 (예: GitHub)" required>
+        <input name="slug" placeholder="슬러그 (비우면 자동 생성)" pattern="[A-Za-z0-9_\-]{1,64}">
+        <button class="primary">엔드포인트 추가</button>
+      </form>
+      <div id="endpoint-list"></div>
+    </section>
+
+    <section id="tab-events" hidden>
+      <div class="row" style="margin-bottom:12px">
+        <select id="event-filter"><option value="">모든 엔드포인트</option></select>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>#</th><th>받은 시각</th><th>엔드포인트</th><th>요청</th><th>크기</th><th>전달 상태</th></tr></thead>
+          <tbody id="event-rows"></tbody>
+        </table>
+      </div>
+      <div class="row" style="justify-content:center;margin-top:12px">
+        <button id="more-events" hidden>더 보기</button>
+      </div>
+    </section>
+
+    <section id="tab-queue" hidden>
+      <p class="muted" style="margin-top:0">아직 목적지에 전달하지 못한 웹훅입니다. 성공할 때까지 자동으로 다시 보냅니다.</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>웹훅</th><th>엔드포인트</th><th>목적지</th><th>시도</th><th>마지막 오류</th><th>다음 시도</th><th></th></tr></thead>
+          <tbody id="queue-rows"></tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+</main>
+
+<dialog id="event-dialog">
+  <div class="row between">
+    <h2 id="ev-title"></h2>
+    <div class="row">
+      <button id="ev-replay" class="small">모든 목적지로 다시 보내기</button>
+      <button id="ev-close" class="small">닫기</button>
+    </div>
+  </div>
+  <p id="ev-meta" class="muted" style="margin:4px 0 0"></p>
+  <h4>목적지별 전달</h4>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>목적지</th><th>상태</th><th>시도</th><th>응답 / 오류</th><th></th></tr></thead>
+      <tbody id="ev-deliveries"></tbody>
+    </table>
+  </div>
+  <h4>헤더</h4>
+  <pre id="ev-headers" class="mono"></pre>
+  <h4>본문</h4>
+  <pre id="ev-body" class="mono"></pre>
+</dialog>
+
+<div id="toast" class="toast"></div>
+
+<script>
+const $ = (sel) => document.querySelector(sel);
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+let token = null;
+try { token = localStorage.getItem('wb-token'); } catch {}
+let currentTab = 'endpoints';
+let endpoints = [];
+let events = [];
+let openEventId = null;
+
+function toast(msg) {
+  const el = $('#toast');
+  el.textContent = msg;
+  el.classList.add('show');
+  clearTimeout(toast.t);
+  toast.t = setTimeout(() => el.classList.remove('show'), 2200);
+}
+
+async function api(path, opts = {}) {
+  const res = await fetch('/api' + path, {
+    ...opts,
+    headers: { 'Authorization': 'Bearer ' + token, ...(opts.body ? { 'Content-Type': 'application/json' } : {}) },
+  });
+  if (res.status === 401) { showLogin('토큰이 올바르지 않습니다'); throw new Error('unauthorized'); }
+  if (res.status === 204) return null;
+  const data = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(data?.error || res.statusText);
+  return data;
+}
+
+function fmtTime(ms) {
+  if (!ms) return '-';
+  return new Date(ms).toLocaleString('ko-KR', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+function fmtRelative(ms) {
+  if (!ms) return '-';
+  const diff = Math.round((ms - Date.now()) / 1000);
+  const abs = Math.abs(diff);
+  const text = abs < 60 ? `${abs}초` : abs < 3600 ? `${Math.round(abs / 60)}분` : abs < 86400 ? `${Math.round(abs / 3600)}시간` : `${Math.round(abs / 86400)}일`;
+  if (abs < 2) return '지금';
+  return diff > 0 ? `${text} 뒤` : `${text} 전`;
+}
+function fmtSize(n) {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+function hookUrl(slug) { return `${location.origin}/h/${slug}`; }
+
+function eventBadge(e) {
+  const total = e.delivered + e.pending;
+  if (total === 0) return '<span class="badge none">목적지 없음</span>';
+  if (e.pending === 0) return `<span class="badge ok">전달 완료 ${e.delivered}/${total}</span>`;
+  return `<span class="badge warn">대기 ${e.pending} · 완료 ${e.delivered}</span>`;
+}
+function deliveryBadge(d) {
+  if (d.state === 'delivered') return '<span class="badge ok">전달 완료</span>';
+  if (d.attempts === 0) return '<span class="badge none">전송 중</span>';
+  return '<span class="badge bad">재시도 중</span>';
+}
+
+// ---------- 로그인 ----------
+function showLogin(err = '') {
+  $('#app').hidden = true;
+  $('#logout').hidden = true;
+  $('#login').hidden = false;
+  $('#login-error').textContent = err;
+}
+$('#login-form').addEventListener('submit', async (ev) => {
+  ev.preventDefault();
+  token = $('#token-input').value.trim();
+  try { localStorage.setItem('wb-token', token); } catch {}
+  await start();
+});
+$('#logout').addEventListener('click', () => {
+  token = null;
+  try { localStorage.removeItem('wb-token'); } catch {}
+  showLogin();
+});
+
+async function start() {
+  if (!token) return showLogin();
+  try {
+    await refresh();
+  } catch (e) {
+    if (e.message !== 'unauthorized') showLogin('서버에 연결할 수 없습니다');
+    return;
+  }
+  $('#login').hidden = true;
+  $('#app').hidden = false;
+  $('#logout').hidden = false;
+}
+
+// ---------- 탭 ----------
+document.querySelectorAll('.tabs button').forEach((btn) => btn.addEventListener('click', () => {
+  currentTab = btn.dataset.tab;
+  document.querySelectorAll('.tabs button').forEach((b) => b.classList.toggle('active', b === btn));
+  for (const name of ['endpoints', 'events', 'queue']) $('#tab-' + name).hidden = name !== currentTab;
+  refresh().catch(() => {});
+}));
+
+async function refresh() {
+  const [stats] = await Promise.all([api('/stats'), loadEndpoints()]);
+  renderStats(stats);
+  if (currentTab === 'events') await loadEvents();
+  if (currentTab === 'queue') await loadQueue();
+  if (openEventId && $('#event-dialog').open) await loadEventDetail(openEventId);
+}
+
+function renderStats(s) {
+  const items = [
+    ['엔드포인트', s.endpoints], ['목적지', s.destinations], ['받은 웹훅 (24시간)', s.events_24h],
+    ['전달 성공 (24시간)', s.delivered_24h], ['전달 대기', s.pending, s.pending > 0], ['재시도 중', s.retrying, s.retrying > 0],
+  ];
+  $('#stats').innerHTML = items.map(([label, value, warn]) =>
+    `<div class="stat ${warn ? 'warn' : ''}"><div class="label">${label}</div><div class="value">${value.toLocaleString()}</div></div>`).join('');
+}
+
+// ---------- 엔드포인트 ----------
+async function loadEndpoints() {
+  endpoints = await api('/endpoints');
+  renderEndpoints();
+  const filter = $('#event-filter');
+  const selected = filter.value;
+  filter.innerHTML = '<option value="">모든 엔드포인트</option>' +
+    endpoints.map((e) => `<option value="${e.id}">${esc(e.name)}</option>`).join('');
+  filter.value = endpoints.some((e) => String(e.id) === selected) ? selected : '';
+}
+
+function renderEndpoints() {
+  const list = $('#endpoint-list');
+  // 입력 중인 목적지 URL은 다시 그려도 남겨 둔다
+  const drafts = {};
+  list.querySelectorAll('input[data-dest-input]').forEach((i) => { drafts[i.dataset.destInput] = i.value; });
+  const focused = document.activeElement?.dataset?.destInput;
+
+  if (endpoints.length === 0) {
+    list.innerHTML = '<div class="card empty">아직 엔드포인트가 없습니다. 위에서 하나 만들어 보세요.</div>';
+    return;
+  }
+  list.innerHTML = endpoints.map((e) => `
+    <div class="card">
+      <div class="row between endpoint-head">
+        <div>
+          <h3>${esc(e.name)}</h3>
+          <span class="muted">웹훅 ${e.event_count.toLocaleString()}건 · 마지막 수신 ${fmtRelative(e.last_received_at)}
+            ${e.pending_count > 0 ? ` · <span class="badge warn">대기 ${e.pending_count}</span>` : ''}</span>
+        </div>
+        <div class="row">
+          <button class="small" data-action="show-events" data-id="${e.id}">웹훅 보기</button>
+          <button class="small danger" data-action="delete-endpoint" data-id="${e.id}">삭제</button>
+        </div>
+      </div>
+      <div class="url mono"><span>${esc(hookUrl(e.slug))}</span><button class="small" data-action="copy" data-text="${esc(hookUrl(e.slug))}">복사</button></div>
+      <div class="muted" style="font-size:12.5px;margin-bottom:4px">목적지 ${e.destinations.length}개 — 받은 웹훅을 아래 모든 목적지로 보냅니다</div>
+      ${e.destinations.map((d) => `
+        <div class="dest ${d.enabled ? '' : 'off'}">
+          <span class="mono">${esc(d.url)}</span>
+          <button class="small" data-action="toggle-dest" data-id="${d.id}" data-enabled="${d.enabled}">${d.enabled ? '끄기' : '켜기'}</button>
+          <button class="small danger" data-action="delete-dest" data-id="${d.id}">삭제</button>
+        </div>`).join('')}
+      <form class="row" data-action="add-dest" data-id="${e.id}" style="margin-top:8px">
+        <input class="grow mono" type="url" data-dest-input="${e.id}" placeholder="https://example.com/webhook" required>
+        <button>목적지 추가</button>
+      </form>
+    </div>`).join('');
+
+  list.querySelectorAll('input[data-dest-input]').forEach((i) => {
+    if (drafts[i.dataset.destInput]) i.value = drafts[i.dataset.destInput];
+    if (focused === i.dataset.destInput) i.focus();
+  });
+}
+
+$('#new-endpoint').addEventListener('submit', async (ev) => {
+  ev.preventDefault();
+  const form = ev.target;
+  try {
+    await api('/endpoints', { method: 'POST', body: JSON.stringify({ name: form.name.value, slug: form.slug.value || null }) });
+    form.reset();
+    toast('엔드포인트를 만들었습니다');
+    await refresh();
+  } catch (e) { toast(e.message); }
+});
+
+$('#endpoint-list').addEventListener('submit', async (ev) => {
+  const form = ev.target.closest('form[data-action="add-dest"]');
+  if (!form) return;
+  ev.preventDefault();
+  const input = form.querySelector('input');
+  try {
+    await api(`/endpoints/${form.dataset.id}/destinations`, { method: 'POST', body: JSON.stringify({ url: input.value }) });
+    input.value = '';
+    toast('목적지를 추가했습니다');
+    await refresh();
+  } catch (e) { toast(e.message); }
+});
+
+$('#endpoint-list').addEventListener('click', async (ev) => {
+  const btn = ev.target.closest('button[data-action]');
+  if (!btn) return;
+  const id = btn.dataset.id;
+  try {
+    switch (btn.dataset.action) {
+      case 'copy':
+        await navigator.clipboard.writeText(btn.dataset.text);
+        toast('URL을 복사했습니다');
+        return;
+      case 'show-events':
+        $('#event-filter').value = id;
+        document.querySelector('.tabs button[data-tab="events"]').click();
+        return;
+      case 'delete-endpoint':
+        if (!confirm('엔드포인트를 삭제할까요? 받은 웹훅 기록과 대기 중인 전달도 함께 지워집니다.')) return;
+        await api(`/endpoints/${id}`, { method: 'DELETE' });
+        toast('엔드포인트를 삭제했습니다');
+        break;
+      case 'toggle-dest':
+        await api(`/destinations/${id}`, { method: 'PATCH', body: JSON.stringify({ enabled: btn.dataset.enabled !== 'true' }) });
+        break;
+      case 'delete-dest':
+        if (!confirm('목적지를 삭제할까요? 이 목적지로 대기 중인 전달도 함께 지워집니다.')) return;
+        await api(`/destinations/${id}`, { method: 'DELETE' });
+        toast('목적지를 삭제했습니다');
+        break;
+    }
+    await refresh();
+  } catch (e) { toast(e.message); }
+});
+
+// ---------- 최근 웹훅 ----------
+async function loadEvents(append = false) {
+  const params = new URLSearchParams({ limit: 50 });
+  if ($('#event-filter').value) params.set('endpoint_id', $('#event-filter').value);
+  if (append && events.length) params.set('before', events[events.length - 1].id);
+  const page = await api('/events?' + params);
+  if (append) {
+    events = events.concat(page);
+  } else {
+    // 자동 새로고침 때 "더 보기"로 불러온 것까지 날리지 않도록, 새로 받은 첫 페이지만 앞에 합친다
+    const oldest = page.length ? page[page.length - 1].id : Infinity;
+    events = page.concat(events.filter((e) => e.id < oldest && page.length === 50));
+  }
+  $('#more-events').hidden = page.length < 50;
+  $('#event-rows').innerHTML = events.length === 0
+    ? '<tr><td colspan="6" class="empty">받은 웹훅이 없습니다</td></tr>'
+    : events.map((e) => `
+      <tr class="click" data-id="${e.id}">
+        <td class="muted">${e.id}</td>
+        <td title="${esc(new Date(e.received_at).toLocaleString('ko-KR'))}">${fmtTime(e.received_at)}</td>
+        <td>${esc(e.endpoint_name)}</td>
+        <td class="mono">${esc(e.method)} ${esc(e.path || '/')}</td>
+        <td class="muted">${fmtSize(e.body_size)}</td>
+        <td>${eventBadge(e)}</td>
+      </tr>`).join('');
+}
+$('#event-filter').addEventListener('change', () => { events = []; loadEvents().catch(() => {}); });
+$('#more-events').addEventListener('click', () => loadEvents(true).catch((e) => toast(e.message)));
+$('#event-rows').addEventListener('click', (ev) => {
+  const row = ev.target.closest('tr[data-id]');
+  if (row) openEvent(Number(row.dataset.id));
+});
+
+// ---------- 웹훅 상세 ----------
+async function openEvent(id) {
+  openEventId = id;
+  try {
+    await loadEventDetail(id);
+    $('#event-dialog').showModal();
+  } catch (e) { toast(e.message); }
+}
+
+async function loadEventDetail(id) {
+  const e = await api(`/events/${id}`);
+  $('#ev-title').textContent = `웹훅 #${e.id} · ${e.endpoint_name}`;
+  $('#ev-meta').textContent = `${e.method} ${e.path || '/'} · ${new Date(e.received_at).toLocaleString('ko-KR')} · ${fmtSize(e.body_size)}`;
+  $('#ev-headers').textContent = e.headers.map(([k, v]) => `${k}: ${v}`).join('\n') || '(없음)';
+  let body = e.body;
+  try { body = JSON.stringify(JSON.parse(body), null, 2); } catch {}
+  $('#ev-body').textContent = body || '(비어 있음)';
+  $('#ev-deliveries').innerHTML = e.deliveries.length === 0
+    ? '<tr><td colspan="5" class="empty">전달할 목적지가 없었습니다</td></tr>'
+    : e.deliveries.map((d) => `
+      <tr>
+        <td class="mono" style="overflow-wrap:anywhere">${esc(d.url)}</td>
+        <td>${deliveryBadge(d)}</td>
+        <td>${d.attempts}</td>
+        <td>${d.state === 'delivered'
+          ? `<span class="muted">${d.last_status} · ${fmtTime(d.delivered_at)}</span>`
+          : `${d.last_error ? `<span class="error-text">${esc(d.last_error)}</span><br>` : ''}<span class="muted">다음 시도 ${fmtRelative(d.next_attempt_at)}</span>`}</td>
+        <td>${d.state === 'pending' ? queueButtons(d.id) : ''}</td>
+      </tr>`).join('');
+}
+$('#ev-close').addEventListener('click', () => $('#event-dialog').close());
+$('#event-dialog').addEventListener('close', () => { openEventId = null; });
+$('#ev-replay').addEventListener('click', async () => {
+  if (!confirm('이 웹훅을 현재 켜져 있는 모든 목적지로 다시 보낼까요?')) return;
+  try {
+    const r = await api(`/events/${openEventId}/replay`, { method: 'POST' });
+    toast(`목적지 ${r.destinations}곳으로 다시 보냅니다`);
+    await refresh();
+  } catch (e) { toast(e.message); }
+});
+
+// ---------- 재시도 대기열 ----------
+function queueButtons(id) {
+  return `<div class="row" style="flex-wrap:nowrap">
+    <button class="small" data-queue="retry" data-id="${id}">지금 재시도</button>
+    <button class="small danger" data-queue="drop" data-id="${id}">포기</button></div>`;
+}
+
+async function loadQueue() {
+  const rows = await api('/deliveries');
+  $('#queue-rows').innerHTML = rows.length === 0
+    ? '<tr><td colspan="7" class="empty">대기 중인 전달이 없습니다</td></tr>'
+    : rows.map((d) => `
+      <tr>
+        <td><a href="#" data-event="${d.event_id}">#${d.event_id}</a></td>
+        <td>${esc(d.endpoint_name)}</td>
+        <td class="mono" style="overflow-wrap:anywhere">${esc(d.url)}</td>
+        <td>${d.attempts}</td>
+        <td class="error-text">${esc(d.last_error || '')}</td>
+        <td class="muted">${fmtRelative(d.next_attempt_at)}</td>
+        <td>${queueButtons(d.id)}</td>
+      </tr>`).join('');
+}
+
+document.addEventListener('click', async (ev) => {
+  const link = ev.target.closest('a[data-event]');
+  if (link) { ev.preventDefault(); openEvent(Number(link.dataset.event)); return; }
+  const btn = ev.target.closest('button[data-queue]');
+  if (!btn) return;
+  try {
+    if (btn.dataset.queue === 'retry') {
+      await api(`/deliveries/${btn.dataset.id}/retry`, { method: 'POST' });
+      toast('바로 다시 보냅니다');
+    } else {
+      if (!confirm('이 전달을 포기할까요? 이 목적지로는 더 이상 보내지 않습니다.')) return;
+      await api(`/deliveries/${btn.dataset.id}`, { method: 'DELETE' });
+      toast('전달을 포기했습니다');
+    }
+    setTimeout(() => refresh().catch(() => {}), 500);
+  } catch (e) { toast(e.message); }
+});
+
+setInterval(() => { if (!$('#app').hidden && !document.hidden) refresh().catch(() => {}); }, 5000);
+start();
+</script>
+</body>
+</html>

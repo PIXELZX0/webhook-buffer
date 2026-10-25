@@ -1,141 +1,149 @@
+pub mod api;
 pub mod config;
 pub mod forwarder;
-pub mod retry;
 pub mod store;
+pub mod worker;
 
 use std::sync::Arc;
 
 use anyhow::Result;
 use axum::{
     Json, Router,
-    body::{Body, Bytes},
+    body::Bytes,
     extract::{DefaultBodyLimit, State},
     http::{HeaderMap, Method, StatusCode, Uri},
-    response::{IntoResponse, Response},
-    routing::get,
+    response::{Html, IntoResponse, Response},
+    routing::{any, get},
 };
 use tokio::{net::TcpListener, sync::Notify};
 use tracing::{error, info, warn};
 
 use crate::{
     config::Config,
-    forwarder::{Forwarder, should_forward_header},
-    retry::Backoff,
+    forwarder::Forwarder,
     store::{Store, Webhook},
+    worker::{Backoff, Worker},
 };
 
+/// 웹훅을 받는 경로 앞부분. `/h/{slug}` 또는 `/h/{slug}/하위/경로`
+const INGEST_PREFIX: &str = "/h/";
+
 #[derive(Clone)]
-struct AppState {
-    store: Store,
-    forwarder: Forwarder,
-    backoff: Backoff,
-    wake_retry: Arc<Notify>,
+pub struct AppState {
+    pub store: Store,
+    pub wake_worker: Arc<Notify>,
+    pub admin_token: Arc<str>,
 }
 
-/// 서버와 재시도 작업을 띄운다. `shutdown`이 끝나면 서버도 종료된다.
+/// 서버와 백그라운드 작업을 띄운다. `shutdown`이 끝나면 서버도 종료된다.
 pub async fn run(
     config: Config,
     store: Store,
     listener: TcpListener,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> Result<()> {
-    let forwarder = Forwarder::new(&config.target_url, config.request_timeout)?;
-    let backoff = Backoff {
-        min: config.min_backoff,
-        max: config.max_backoff,
+    let admin_token = match config.admin_token.clone() {
+        Some(t) => t,
+        None => {
+            let t = random_hex(16);
+            warn!("ADMIN_TOKEN이 없어서 임시 토큰을 만들었습니다 (재시작하면 바뀝니다): {t}");
+            t
+        }
     };
-    let wake_retry = Arc::new(Notify::new());
 
-    let retry_task = tokio::spawn(retry::run(
-        store.clone(),
-        forwarder.clone(),
-        backoff,
-        wake_retry.clone(),
-    ));
+    let wake_worker = Arc::new(Notify::new());
+    let worker = Worker {
+        store: store.clone(),
+        forwarder: Forwarder::new(config.request_timeout)?,
+        backoff: Backoff {
+            min: config.min_backoff,
+            max: config.max_backoff,
+        },
+        lease: config.request_timeout + std::time::Duration::from_secs(30),
+        concurrency: config.max_concurrency,
+        wake: wake_worker.clone(),
+    };
+    let worker_task = tokio::spawn(worker.run());
+    let prune_task = tokio::spawn(worker::prune_loop(store.clone(), config.retention));
 
     let state = AppState {
         store,
-        forwarder,
-        backoff,
-        wake_retry,
+        wake_worker,
+        admin_token: admin_token.into(),
     };
     let app = Router::new()
-        .route("/_buffer/status", get(status))
-        .fallback(receive)
+        .route("/", get(panel))
+        .route("/h/{slug}", any(ingest))
+        .route("/h/{slug}/{*rest}", any(ingest))
+        .nest("/api", api::router(state.clone()))
         .layer(DefaultBodyLimit::max(config.max_body_bytes))
         .with_state(state);
 
     info!(
-        "{}에서 웹훅 수신 대기, 목적지: {}",
-        listener.local_addr()?,
-        config.target_url
+        "{}에서 대기 중 (패널: /, 웹훅: /h/{{slug}})",
+        listener.local_addr()?
     );
     let result = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown)
         .await;
-    retry_task.abort();
+    worker_task.abort();
+    prune_task.abort();
     Ok(result?)
 }
 
-async fn status(State(state): State<AppState>) -> Response {
-    match state.store.pending_count().await {
-        Ok(pending) => Json(serde_json::json!({ "pending": pending })).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    }
+async fn panel() -> Html<&'static str> {
+    Html(include_str!("panel.html"))
 }
 
-/// 모든 메서드·경로의 요청을 웹훅으로 받아 목적지로 전달한다.
-async fn receive(
+/// 웹훅을 받아 디스크에 저장하고 목적지마다 전달 작업을 만든다.
+/// 실제 전달은 워커가 바로 이어서 하고, 실패하면 성공할 때까지 다시 보낸다.
+async fn ingest(
     State(state): State<AppState>,
     method: Method,
     uri: Uri,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
+    let rest = uri.path().strip_prefix(INGEST_PREFIX).unwrap_or_default();
+    let (slug, sub_path) = match rest.find('/') {
+        Some(i) => (&rest[..i], &rest[i..]),
+        None => (rest, ""),
+    };
+    let path_and_query = match uri.query() {
+        Some(q) => format!("{sub_path}?{q}"),
+        None => sub_path.to_string(),
+    };
+
+    let (endpoint, destination_ids) = match state.store.endpoint_by_slug(slug.to_string()).await {
+        Ok(Some(found)) => found,
+        Ok(None) => return (StatusCode::NOT_FOUND, "unknown endpoint").into_response(),
+        Err(e) => {
+            error!("엔드포인트 조회 실패: {e:#}");
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        }
+    };
+
     let webhook = Webhook {
         method: method.to_string(),
-        path_and_query: uri
-            .path_and_query()
-            .map(|p| p.as_str().to_string())
-            .unwrap_or_else(|| "/".into()),
+        path_and_query,
         headers: headers
             .iter()
             .map(|(k, v)| (k.as_str().to_string(), v.as_bytes().to_vec()))
             .collect(),
         body,
     };
+    let destinations = destination_ids.len();
 
-    // 1. 먼저 바로 전달해 본다. 성공하면 목적지 응답을 그대로 돌려주고 끝.
-    let err = match state.forwarder.send(&webhook).await {
-        Ok(delivered) => {
-            let mut resp = Response::builder().status(delivered.status.as_u16());
-            for (name, value) in &delivered.headers {
-                if should_forward_header(name.as_str()) {
-                    resp = resp.header(name.as_str(), value.as_bytes());
-                }
-            }
-            return resp
-                .body(Body::from(delivered.body))
-                .unwrap_or_else(|_| StatusCode::OK.into_response());
-        }
-        Err(err) => err,
-    };
-
-    // 2. 실패하면 저장해 두고 재시도 작업이 성공할 때까지 다시 보낸다.
-    warn!(
-        "{} {} 전달 실패, 저장 후 재시도합니다: {err}",
-        webhook.method, webhook.path_and_query
-    );
     match state
         .store
-        .insert(webhook, 1, state.backoff.next_attempt_at(1), err)
+        .insert_event(endpoint.id, webhook, destination_ids)
         .await
     {
-        Ok(id) => {
-            state.wake_retry.notify_one();
+        Ok(event_id) => {
+            state.wake_worker.notify_one();
             (
                 StatusCode::ACCEPTED,
-                Json(serde_json::json!({ "status": "queued", "id": id })),
+                Json(serde_json::json!({ "event_id": event_id, "destinations": destinations })),
             )
                 .into_response()
         }
@@ -145,4 +153,10 @@ async fn receive(
             (StatusCode::SERVICE_UNAVAILABLE, "failed to buffer webhook").into_response()
         }
     }
+}
+
+pub fn random_hex(bytes: usize) -> String {
+    let mut buf = vec![0u8; bytes];
+    rand::fill(&mut buf[..]);
+    buf.iter().map(|b| format!("{b:02x}")).collect()
 }
