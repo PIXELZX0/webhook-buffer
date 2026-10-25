@@ -31,6 +31,27 @@ ADMIN_TOKEN=아무도-모르는-값 cargo run --release
 브라우저에서 `http://localhost:8080/`을 열고 `ADMIN_TOKEN`으로 들어가면 됩니다.
 `ADMIN_TOKEN`을 주지 않으면 실행할 때마다 임시 토큰을 만들어 로그에 찍습니다.
 
+### Docker
+
+```sh
+docker run -d --name webhook-buffer -p 8080:8080 \
+  -e ADMIN_TOKEN=아무도-모르는-값 \
+  -v webhook-buffer-data:/data \
+  ghcr.io/pixelzx0/webhook-buffer:latest
+```
+
+DB는 컨테이너 안 `/data`에 저장되니 볼륨을 꼭 붙이세요. 컨테이너는 uid 65532로 돕니다.
+볼륨 대신 호스트 디렉터리를 붙인다면 그 디렉터리를 이 uid가 쓸 수 있어야 합니다.
+
+이미지는 `master`에 푸시될 때마다 GitHub Actions가 만들어 `ghcr.io`에 올립니다.
+지원 아키텍처는 `linux/amd64`, `arm64`, `arm/v7`, `arm/v6`, `386`, `ppc64le`, `riscv64`, `loong64`, `s390x`입니다.
+
+| 태그 | 언제 |
+| --- | --- |
+| `latest` | `master`의 최신 커밋 |
+| `1.2.3`, `1.2`, `1` | `v1.2.3` 태그를 푸시했을 때 |
+| `sha-abc1234` | 커밋마다 |
+
 ## 복구 알림
 
 목적지마다 고유한 복구 알림 URL이 있습니다. 패널의 목적지 아래에서 복사할 수 있습니다.
