@@ -32,6 +32,8 @@ fn should_forward_header(name: &str) -> bool {
 /// 전달 실패 사유. 목적지가 응답했다면 그 상태 코드도 담는다.
 #[derive(Debug)]
 pub struct SendError {
+    /// 연결 실패나 타임아웃처럼 목적지로부터 응답을 아예 받지 못했는지
+    pub unreachable: bool,
     pub status: Option<u16>,
     pub message: String,
 }
@@ -53,7 +55,11 @@ impl Forwarder {
 
     /// 웹훅을 한 번 전달해 본다. 2xx 응답만 성공으로 보고 상태 코드를 돌려준다.
     pub async fn send(&self, destination: &str, webhook: &Webhook) -> Result<u16, SendError> {
-        let fail = |status, message| SendError { status, message };
+        let fail = |status, message| SendError {
+            unreachable: false,
+            status,
+            message,
+        };
 
         let method = Method::from_bytes(webhook.method.as_bytes())
             .map_err(|e| fail(None, format!("잘못된 메서드 {}: {e}", webhook.method)))?;
@@ -79,7 +85,11 @@ impl Forwarder {
             .body(webhook.body.clone())
             .send()
             .await
-            .map_err(|e| fail(None, format!("요청 실패: {e}")))?;
+            .map_err(|e| SendError {
+                unreachable: true,
+                status: None,
+                message: format!("응답 없음: {e}"),
+            })?;
 
         let status = resp.status();
         if status.is_success() {

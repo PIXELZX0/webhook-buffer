@@ -23,10 +23,11 @@ pub fn router(state: AppState) -> Router<AppState> {
             "/destinations/{id}",
             patch(update_destination).delete(delete_destination),
         )
+        .route("/destinations/{id}/alive", post(destination_alive))
         .route("/events", get(list_events))
         .route("/events/{id}", get(get_event))
         .route("/events/{id}/replay", post(replay_event))
-        .route("/deliveries", get(list_pending))
+        .route("/deliveries", get(list_undelivered))
         .route("/deliveries/{id}", axum::routing::delete(delete_delivery))
         .route("/deliveries/{id}/retry", post(retry_delivery))
         .layer(middleware::from_fn_with_state(state, require_token))
@@ -140,9 +141,24 @@ async fn delete_endpoint(State(s): State<AppState>, Path(id): Path<i64>) -> ApiR
     found(s.store.delete_endpoint(id).await?)
 }
 
+/// 새 목적지의 기본 재시도 횟수
+const DEFAULT_MAX_RETRIES: u32 = 10;
+
+/// 필드가 빠진 것(`None`)과 `null`(`Some(None)`)을 구분한다.
+fn double_option<'de, D, T>(d: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(d).map(Some)
+}
+
 #[derive(Deserialize)]
 struct NewDestination {
     url: String,
+    /// 빠지면 기본값, `null`이면 무제한
+    #[serde(default, deserialize_with = "double_option")]
+    max_retries: Option<Option<u32>>,
 }
 
 async fn add_destination(
@@ -159,7 +175,12 @@ async fn add_destination(
             ));
         }
     }
-    match s.store.add_destination(endpoint_id, url).await? {
+    let max_retries = body.max_retries.unwrap_or(Some(DEFAULT_MAX_RETRIES));
+    match s
+        .store
+        .add_destination(endpoint_id, url, max_retries, random_hex(16))
+        .await?
+    {
         Some(d) => Ok((StatusCode::CREATED, Json(d)).into_response()),
         None => Err(ApiError::not_found()),
     }
@@ -167,7 +188,10 @@ async fn add_destination(
 
 #[derive(Deserialize)]
 struct UpdateDestination {
-    enabled: bool,
+    enabled: Option<bool>,
+    /// `null`이면 무제한
+    #[serde(default, deserialize_with = "double_option")]
+    max_retries: Option<Option<u32>>,
 }
 
 async fn update_destination(
@@ -175,12 +199,29 @@ async fn update_destination(
     Path(id): Path<i64>,
     Json(body): Json<UpdateDestination>,
 ) -> ApiResult {
-    let changed = s.store.set_destination_enabled(id, body.enabled).await?;
-    if changed && body.enabled {
-        // 꺼져 있는 동안 밀린 전달을 바로 보내도록 깨운다.
-        s.wake_worker.notify_one();
+    let mut changed = true;
+    if let Some(max_retries) = body.max_retries {
+        changed &= s.store.set_max_retries(id, max_retries).await?;
+    }
+    if let Some(enabled) = body.enabled {
+        changed &= s.store.set_destination_enabled(id, enabled).await?;
+        if changed && enabled {
+            // 꺼져 있는 동안 밀린 전달을 바로 보내도록 깨운다.
+            s.wake_worker.notify_one();
+        }
     }
     found(changed)
+}
+
+/// 패널에서 목적지를 직접 "살아남"으로 표시한다.
+async fn destination_alive(State(s): State<AppState>, Path(id): Path<i64>) -> ApiResult {
+    match s.store.mark_destination_alive(id).await? {
+        Some(queued) => {
+            s.wake_worker.notify_one();
+            ok(serde_json::json!({ "queued": queued }))
+        }
+        None => Err(ApiError::not_found()),
+    }
 }
 
 async fn delete_destination(State(s): State<AppState>, Path(id): Path<i64>) -> ApiResult {
@@ -216,8 +257,8 @@ async fn replay_event(State(s): State<AppState>, Path(id): Path<i64>) -> ApiResu
     }
 }
 
-async fn list_pending(State(s): State<AppState>) -> ApiResult {
-    ok(s.store.list_pending(200).await?)
+async fn list_undelivered(State(s): State<AppState>) -> ApiResult {
+    ok(s.store.list_undelivered(200).await?)
 }
 
 async fn retry_delivery(State(s): State<AppState>, Path(id): Path<i64>) -> ApiResult {

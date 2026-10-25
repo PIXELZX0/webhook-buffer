@@ -1,4 +1,4 @@
-//! 저장된 전달 작업을 목적지마다 성공할 때까지 계속 보내는 백그라운드 작업
+//! 저장된 전달 작업을 목적지마다 보내는 백그라운드 작업
 
 use std::{sync::Arc, time::Duration};
 
@@ -119,21 +119,51 @@ impl Worker {
                     .mark_delivered(job.delivery_id, attempts, status)
                     .await
             }
-            Err(err) => {
-                let delay = self.backoff.delay(attempts);
+            Err(err) if err.unreachable => {
+                // 응답이 아예 없으면 다시 두드리지 않고, 목적지가 살아났다고 알려줄 때까지 쌓아 둔다.
                 warn!(
                     delivery = job.delivery_id,
-                    attempts,
                     url = %job.url,
-                    "전달 실패, {:.1}초 뒤 다시 시도: {}",
-                    delay.as_secs_f32(),
+                    "목적지 응답 없음, 복구 알림이 올 때까지 보관: {}",
                     err.message
                 );
                 self.store
-                    .mark_failed(
+                    .mark_unreachable(job.delivery_id, job.destination_id, attempts, err.message)
+                    .await
+            }
+            Err(err) => {
+                // 에러로 응답한 경우만 정해진 횟수까지 다시 보낸다. 첫 응답은 재시도가 아니므로 세지 않는다.
+                let error_responses = job.error_responses + 1;
+                let retries_used = error_responses - 1;
+                let next_attempt_at = match job.max_retries {
+                    Some(max) if retries_used >= max => {
+                        warn!(
+                            delivery = job.delivery_id,
+                            url = %job.url,
+                            "재시도 {max}회를 다 써서 멈춤: {}",
+                            err.message
+                        );
+                        None
+                    }
+                    _ => {
+                        let delay = self.backoff.delay(error_responses);
+                        warn!(
+                            delivery = job.delivery_id,
+                            attempts,
+                            url = %job.url,
+                            "전달 실패, {:.1}초 뒤 다시 시도: {}",
+                            delay.as_secs_f32(),
+                            err.message
+                        );
+                        Some(now_ms() + delay.as_millis() as i64)
+                    }
+                };
+                self.store
+                    .mark_error_response(
                         job.delivery_id,
                         attempts,
-                        now_ms() + delay.as_millis() as i64,
+                        error_responses,
+                        next_attempt_at,
                         err.status,
                         err.message,
                     )

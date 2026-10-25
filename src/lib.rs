@@ -10,7 +10,7 @@ use anyhow::Result;
 use axum::{
     Json, Router,
     body::Bytes,
-    extract::{DefaultBodyLimit, State},
+    extract::{DefaultBodyLimit, Path, State},
     http::{HeaderMap, Method, StatusCode, Uri},
     response::{Html, IntoResponse, Response},
     routing::{any, get},
@@ -75,12 +75,16 @@ pub async fn run(
         .route("/", get(panel))
         .route("/h/{slug}", any(ingest))
         .route("/h/{slug}/{*rest}", any(ingest))
+        .route(
+            "/d/{token}/alive",
+            get(destination_alive).post(destination_alive),
+        )
         .nest("/api", api::router(state.clone()))
         .layer(DefaultBodyLimit::max(config.max_body_bytes))
         .with_state(state);
 
     info!(
-        "{}에서 대기 중 (패널: /, 웹훅: /h/{{slug}})",
+        "{}에서 대기 중 (패널: /, 웹훅: /h/{{slug}}, 복구 알림: /d/{{token}}/alive)",
         listener.local_addr()?
     );
     let result = axum::serve(listener, app)
@@ -151,6 +155,26 @@ async fn ingest(
             // 저장조차 못 했으면 보낸 쪽이 다시 보낼 수 있도록 에러를 돌려준다.
             error!("웹훅 저장 실패: {e:#}");
             (StatusCode::SERVICE_UNAVAILABLE, "failed to buffer webhook").into_response()
+        }
+    }
+}
+
+/// 목적지 서버가 "다시 살아났다"고 알리는 곳. 목적지마다 받은 복구 토큰으로 호출한다.
+/// 응답 없음 상태로 쌓아 둔 웹훅을 바로 보내기 시작한다.
+async fn destination_alive(State(state): State<AppState>, Path(token): Path<String>) -> Response {
+    match state.store.mark_alive_by_token(token).await {
+        Ok(Some((id, queued))) => {
+            info!(
+                destination = id,
+                queued, "목적지 복구 알림 받음, 쌓아 둔 웹훅을 보냅니다"
+            );
+            state.wake_worker.notify_one();
+            Json(serde_json::json!({ "status": "ok", "queued": queued })).into_response()
+        }
+        Ok(None) => (StatusCode::NOT_FOUND, "unknown token").into_response(),
+        Err(e) => {
+            error!("복구 알림 처리 실패: {e:#}");
+            StatusCode::SERVICE_UNAVAILABLE.into_response()
         }
     }
 }

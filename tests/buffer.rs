@@ -55,6 +55,10 @@ async fn target_handler(
 }
 
 async fn spawn_target(fail_times: usize) -> (String, Target) {
+    spawn_target_on(TcpListener::bind("127.0.0.1:0").await.unwrap(), fail_times).await
+}
+
+async fn spawn_target_on(listener: TcpListener, fail_times: usize) -> (String, Target) {
     let target = Target {
         fail_times,
         ..Default::default()
@@ -62,7 +66,6 @@ async fn spawn_target(fail_times: usize) -> (String, Target) {
     let app = Router::new()
         .fallback(target_handler)
         .with_state(target.clone());
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     (url, target)
@@ -114,8 +117,14 @@ impl Buffer {
         resp.json().await.unwrap_or(Value::Null)
     }
 
-    /// 엔드포인트를 만들고 목적지들을 붙인다.
-    async fn endpoint(&self, slug: &str, destinations: &[&str]) {
+    /// 엔드포인트를 만들고 목적지들을 기본 설정으로 붙인다.
+    async fn endpoint(&self, slug: &str, destinations: &[&str]) -> Vec<Value> {
+        let destinations: Vec<Value> = destinations.iter().map(|u| json!({ "url": u })).collect();
+        self.endpoint_with(slug, &destinations).await
+    }
+
+    /// 엔드포인트를 만들고 목적지 설정(JSON)들을 붙인다. 만들어진 목적지들을 돌려준다.
+    async fn endpoint_with(&self, slug: &str, destinations: &[Value]) -> Vec<Value> {
         let ep = self
             .api(
                 reqwest::Method::POST,
@@ -123,14 +132,29 @@ impl Buffer {
                 Some(json!({ "name": slug, "slug": slug })),
             )
             .await;
-        for url in destinations {
-            self.api(
-                reqwest::Method::POST,
-                &format!("/endpoints/{}/destinations", ep["id"]),
-                Some(json!({ "url": url })),
-            )
-            .await;
+        let mut created = Vec::new();
+        for d in destinations {
+            created.push(
+                self.api(
+                    reqwest::Method::POST,
+                    &format!("/endpoints/{}/destinations", ep["id"]),
+                    Some(d.clone()),
+                )
+                .await,
+            );
         }
+        created
+    }
+
+    async fn send(&self, slug: &str, body: &'static str) {
+        let resp = self
+            .client
+            .post(format!("{}/h/{slug}", self.base))
+            .body(body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 202);
     }
 
     async fn stats(&self) -> Value {
@@ -192,32 +216,87 @@ async fn fans_out_to_every_destination_and_retries_failures() {
 }
 
 #[tokio::test]
-async fn keeps_retrying_while_destination_is_down() {
-    // 아무도 듣지 않는 포트
-    let dead = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let dead_url = format!("http://{}", dead.local_addr().unwrap());
-    drop(dead);
+async fn holds_webhooks_while_unreachable_until_destination_says_alive() {
+    // 포트만 잡아 두고 아무도 듣지 않는 목적지
+    let port = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = port.local_addr().unwrap();
+    drop(port);
     let buffer = Buffer::spawn().await;
-    buffer.endpoint("dead", &[&dead_url]).await;
+    let dest = buffer
+        .endpoint("svc", &[&format!("http://{addr}")])
+        .await
+        .remove(0);
+    assert_eq!(dest["max_retries"], 10);
+
+    buffer.send("svc", "first").await;
+    wait_until(async || buffer.stats().await["down_destinations"] == 1).await;
+    // 응답 없음 상태에서 들어온 웹훅은 보내 보지도 않고 보관만 한다
+    buffer.send("svc", "second").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let queue = buffer.api(reqwest::Method::GET, "/deliveries", None).await;
+    let queue = queue.as_array().unwrap();
+    assert_eq!(queue.len(), 2);
+    assert!(queue.iter().all(|d| d["destination_down"] == true));
+    let attempts: Vec<_> = queue
+        .iter()
+        .map(|d| d["attempts"].as_u64().unwrap())
+        .collect();
+    assert_eq!(
+        attempts.iter().sum::<u64>(),
+        1,
+        "재시도하면 안 됩니다: {attempts:?}"
+    );
+
+    // 목적지가 다시 떠서 복구 알림을 보낸다
+    let (_, target) = spawn_target_on(TcpListener::bind(addr).await.unwrap(), 0).await;
+    let token = dest["recover_token"].as_str().unwrap();
+    let resp: Value = buffer
+        .client
+        .post(format!("{}/d/{token}/alive", buffer.base))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(resp["queued"], 2);
+
+    wait_until(async || target.received().len() == 2).await;
+    let bodies: Vec<_> = target.received().into_iter().map(|r| r.2).collect();
+    assert!(bodies.contains(&Bytes::from("first")) && bodies.contains(&Bytes::from("second")));
+    let stats = buffer.stats().await;
+    assert_eq!(
+        (stats["down_destinations"].clone(), stats["pending"].clone()),
+        (json!(0), json!(0))
+    );
 
     let resp = buffer
         .client
-        .post(format!("{}/h/dead", buffer.base))
-        .body("x")
+        .post(format!("{}/d/wrong-token/alive", buffer.base))
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 202);
+    assert_eq!(resp.status(), 404);
+}
 
-    wait_until(async || buffer.stats().await["retrying"] == 1).await;
+#[tokio::test]
+async fn stops_after_configured_retries() {
+    let (url, target) = spawn_target(usize::MAX).await;
+    let buffer = Buffer::spawn().await;
+    buffer
+        .endpoint_with("err", &[json!({ "url": url, "max_retries": 2 })])
+        .await;
+
+    buffer.send("err", "x").await;
+    wait_until(async || buffer.stats().await["failed"] == 1).await;
+    // 첫 시도 1번 + 재시도 2번
+    assert_eq!(target.hits.load(Ordering::SeqCst), 3);
     let queue = buffer.api(reqwest::Method::GET, "/deliveries", None).await;
-    assert_eq!(queue.as_array().unwrap().len(), 1);
-    assert!(
-        queue[0]["last_error"]
-            .as_str()
-            .unwrap()
-            .contains("요청 실패")
-    );
+    assert_eq!(queue[0]["state"], "failed");
+    assert_eq!(queue[0]["last_status"], 503);
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(target.hits.load(Ordering::SeqCst), 3);
 }
 
 #[tokio::test]

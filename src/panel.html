@@ -51,9 +51,13 @@
   .url { display: flex; gap: 6px; align-items: center; margin: 8px 0 12px; background: var(--code);
          border-radius: 6px; padding: 6px 6px 6px 10px; overflow: hidden; }
   .url span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .dest { display: flex; gap: 8px; align-items: center; padding: 7px 0; border-top: 1px solid var(--border); }
-  .dest .mono { flex: 1; overflow-wrap: anywhere; }
-  .dest.off .mono { color: var(--muted); text-decoration: line-through; }
+  .dest { display: flex; gap: 8px; align-items: flex-start; padding: 9px 0; border-top: 1px solid var(--border); flex-wrap: wrap; }
+  .dest-main { flex: 1; min-width: 220px; }
+  .dest-main .mono { overflow-wrap: anywhere; }
+  .dest.off .dest-main > .row .mono { color: var(--muted); text-decoration: line-through; }
+  .dest-meta { color: var(--muted); font-size: 12.5px; margin-top: 4px; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  .dest-meta code { background: var(--code); border-radius: 4px; padding: 1px 6px; overflow-wrap: anywhere; }
+  input.retry { width: 72px; padding: 2px 6px; font-size: 12.5px; }
   table { width: 100%; border-collapse: collapse; }
   th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
   th { color: var(--muted); font-weight: 500; font-size: 12.5px; white-space: nowrap; }
@@ -132,10 +136,10 @@
     </section>
 
     <section id="tab-queue" hidden>
-      <p class="muted" style="margin-top:0">아직 목적지에 전달하지 못한 웹훅입니다. 성공할 때까지 자동으로 다시 보냅니다.</p>
+      <p class="muted" style="margin-top:0">아직 목적지에 전달하지 못한 웹훅입니다. 에러 응답은 목적지에 설정한 횟수만큼 다시 보내고, 아예 응답이 없으면 목적지가 복구 알림을 보낼 때까지 보관합니다.</p>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>웹훅</th><th>엔드포인트</th><th>목적지</th><th>시도</th><th>마지막 오류</th><th>다음 시도</th><th></th></tr></thead>
+          <thead><tr><th>웹훅</th><th>엔드포인트</th><th>목적지</th><th>상태</th><th>시도</th><th>마지막 오류</th><th>다음 시도</th><th></th></tr></thead>
           <tbody id="queue-rows"></tbody>
         </table>
       </div>
@@ -216,17 +220,31 @@ function fmtSize(n) {
   return `${(n / 1024 / 1024).toFixed(1)} MB`;
 }
 function hookUrl(slug) { return `${location.origin}/h/${slug}`; }
+function aliveUrl(token) { return `${location.origin}/d/${token}/alive`; }
 
 function eventBadge(e) {
-  const total = e.delivered + e.pending;
+  const total = e.delivered + e.pending + e.failed;
   if (total === 0) return '<span class="badge none">목적지 없음</span>';
+  if (e.failed > 0) return `<span class="badge bad">실패 ${e.failed}</span>${e.pending ? ` <span class="badge warn">대기 ${e.pending}</span>` : ''}`;
   if (e.pending === 0) return `<span class="badge ok">전달 완료 ${e.delivered}/${total}</span>`;
   return `<span class="badge warn">대기 ${e.pending} · 완료 ${e.delivered}</span>`;
 }
 function deliveryBadge(d) {
   if (d.state === 'delivered') return '<span class="badge ok">전달 완료</span>';
+  if (d.state === 'failed') return '<span class="badge bad">실패 (재시도 초과)</span>';
+  if (d.destination_down) return '<span class="badge warn">응답 없음 · 보관 중</span>';
   if (d.attempts === 0) return '<span class="badge none">전송 중</span>';
   return '<span class="badge bad">재시도 중</span>';
+}
+function destinationBadge(d) {
+  if (!d.enabled) return '<span class="badge none">꺼짐</span>';
+  if (d.down_since) return `<span class="badge bad">응답 없음 · ${fmtRelative(d.down_since)}부터</span>`;
+  return '<span class="badge ok">정상</span>';
+}
+function nextAttemptText(d) {
+  if (d.state === 'failed') return '-';
+  if (d.destination_down) return '복구 알림 후';
+  return fmtRelative(d.next_attempt_at);
 }
 
 // ---------- 로그인 ----------
@@ -281,6 +299,7 @@ function renderStats(s) {
   const items = [
     ['엔드포인트', s.endpoints], ['목적지', s.destinations], ['받은 웹훅 (24시간)', s.events_24h],
     ['전달 성공 (24시간)', s.delivered_24h], ['전달 대기', s.pending, s.pending > 0], ['재시도 중', s.retrying, s.retrying > 0],
+    ['응답 없는 목적지', s.down_destinations, s.down_destinations > 0], ['실패 (재시도 초과)', s.failed, s.failed > 0],
   ];
   $('#stats').innerHTML = items.map(([label, value, warn]) =>
     `<div class="stat ${warn ? 'warn' : ''}"><div class="label">${label}</div><div class="value">${value.toLocaleString()}</div></div>`).join('');
@@ -299,6 +318,8 @@ async function loadEndpoints() {
 
 function renderEndpoints() {
   const list = $('#endpoint-list');
+  // 재시도 횟수를 고치는 중에는 자동 새로고침으로 입력이 날아가지 않게 다시 그리지 않는다
+  if (document.activeElement?.matches?.('input[data-retry]')) return;
   // 입력 중인 목적지 URL은 다시 그려도 남겨 둔다
   const drafts = {};
   list.querySelectorAll('input[data-dest-input]').forEach((i) => { drafts[i.dataset.destInput] = i.value; });
@@ -325,12 +346,24 @@ function renderEndpoints() {
       <div class="muted" style="font-size:12.5px;margin-bottom:4px">목적지 ${e.destinations.length}개 — 받은 웹훅을 아래 모든 목적지로 보냅니다</div>
       ${e.destinations.map((d) => `
         <div class="dest ${d.enabled ? '' : 'off'}">
-          <span class="mono">${esc(d.url)}</span>
-          <button class="small" data-action="toggle-dest" data-id="${d.id}" data-enabled="${d.enabled}">${d.enabled ? '끄기' : '켜기'}</button>
-          <button class="small danger" data-action="delete-dest" data-id="${d.id}">삭제</button>
+          <div class="dest-main">
+            <div class="row"><span class="mono">${esc(d.url)}</span>${destinationBadge(d)}</div>
+            <div class="dest-meta">
+              <label>재시도 <input class="retry" type="number" min="0" data-retry="${d.id}" value="${d.max_retries ?? ''}" placeholder="무제한"> 회</label>
+              <span>·</span>
+              <span>복구 알림</span><code>POST ${esc(aliveUrl(d.recover_token))}</code>
+              <button class="small" data-action="copy" data-text="${esc(aliveUrl(d.recover_token))}">복사</button>
+            </div>
+          </div>
+          <div class="row">
+            ${d.down_since ? `<button class="small" data-action="alive" data-id="${d.id}">살아남 처리</button>` : ''}
+            <button class="small" data-action="toggle-dest" data-id="${d.id}" data-enabled="${d.enabled}">${d.enabled ? '끄기' : '켜기'}</button>
+            <button class="small danger" data-action="delete-dest" data-id="${d.id}">삭제</button>
+          </div>
         </div>`).join('')}
       <form class="row" data-action="add-dest" data-id="${e.id}" style="margin-top:8px">
         <input class="grow mono" type="url" data-dest-input="${e.id}" placeholder="https://example.com/webhook" required>
+        <label class="muted" style="font-size:12.5px">재시도 <input class="retry" type="number" min="0" name="retries" value="10" placeholder="무제한"> 회</label>
         <button>목적지 추가</button>
       </form>
     </div>`).join('');
@@ -356,9 +389,13 @@ $('#endpoint-list').addEventListener('submit', async (ev) => {
   const form = ev.target.closest('form[data-action="add-dest"]');
   if (!form) return;
   ev.preventDefault();
-  const input = form.querySelector('input');
+  const input = form.querySelector('input[data-dest-input]');
+  const retries = form.querySelector('input[name=retries]').value;
   try {
-    await api(`/endpoints/${form.dataset.id}/destinations`, { method: 'POST', body: JSON.stringify({ url: input.value }) });
+    await api(`/endpoints/${form.dataset.id}/destinations`, {
+      method: 'POST',
+      body: JSON.stringify({ url: input.value, max_retries: retries === '' ? null : Number(retries) }),
+    });
     input.value = '';
     toast('목적지를 추가했습니다');
     await refresh();
@@ -375,6 +412,11 @@ $('#endpoint-list').addEventListener('click', async (ev) => {
         await navigator.clipboard.writeText(btn.dataset.text);
         toast('URL을 복사했습니다');
         return;
+      case 'alive': {
+        const r = await api(`/destinations/${id}/alive`, { method: 'POST' });
+        toast(`보관해 둔 웹훅 ${r.queued}건을 보냅니다`);
+        break;
+      }
       case 'show-events':
         $('#event-filter').value = id;
         document.querySelector('.tabs button[data-tab="events"]').click();
@@ -393,6 +435,21 @@ $('#endpoint-list').addEventListener('click', async (ev) => {
         toast('목적지를 삭제했습니다');
         break;
     }
+    await refresh();
+  } catch (e) { toast(e.message); }
+});
+
+$('#endpoint-list').addEventListener('change', async (ev) => {
+  const input = ev.target.closest('input[data-retry]');
+  if (!input) return;
+  const value = input.value.trim();
+  try {
+    await api(`/destinations/${input.dataset.retry}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ max_retries: value === '' ? null : Number(value) }),
+    });
+    toast(value === '' ? '재시도 횟수: 무제한' : `재시도 횟수: ${value}회`);
+    input.blur();
     await refresh();
   } catch (e) { toast(e.message); }
 });
@@ -456,8 +513,8 @@ async function loadEventDetail(id) {
         <td>${d.attempts}</td>
         <td>${d.state === 'delivered'
           ? `<span class="muted">${d.last_status} · ${fmtTime(d.delivered_at)}</span>`
-          : `${d.last_error ? `<span class="error-text">${esc(d.last_error)}</span><br>` : ''}<span class="muted">다음 시도 ${fmtRelative(d.next_attempt_at)}</span>`}</td>
-        <td>${d.state === 'pending' ? queueButtons(d.id) : ''}</td>
+          : `${d.last_error ? `<span class="error-text">${esc(d.last_error)}</span><br>` : ''}<span class="muted">다음 시도 ${nextAttemptText(d)}</span>`}</td>
+        <td>${d.state !== 'delivered' ? queueButtons(d) : ''}</td>
       </tr>`).join('');
 }
 $('#ev-close').addEventListener('click', () => $('#event-dialog').close());
@@ -472,25 +529,29 @@ $('#ev-replay').addEventListener('click', async () => {
 });
 
 // ---------- 재시도 대기열 ----------
-function queueButtons(id) {
-  return `<div class="row" style="flex-wrap:nowrap">
-    <button class="small" data-queue="retry" data-id="${id}">지금 재시도</button>
-    <button class="small danger" data-queue="drop" data-id="${id}">포기</button></div>`;
+function queueButtons(d) {
+  // 응답 없음 상태인 목적지로는 복구 알림 전까지 보내지 않으므로 재시도 버튼을 두지 않는다
+  const retry = d.state === 'pending' && d.destination_down
+    ? ''
+    : `<button class="small" data-queue="retry" data-id="${d.id}">${d.state === 'failed' ? '다시 시도' : '지금 재시도'}</button>`;
+  return `<div class="row" style="flex-wrap:nowrap">${retry}
+    <button class="small danger" data-queue="drop" data-id="${d.id}">포기</button></div>`;
 }
 
 async function loadQueue() {
   const rows = await api('/deliveries');
   $('#queue-rows').innerHTML = rows.length === 0
-    ? '<tr><td colspan="7" class="empty">대기 중인 전달이 없습니다</td></tr>'
+    ? '<tr><td colspan="8" class="empty">대기 중인 전달이 없습니다</td></tr>'
     : rows.map((d) => `
       <tr>
         <td><a href="#" data-event="${d.event_id}">#${d.event_id}</a></td>
         <td>${esc(d.endpoint_name)}</td>
         <td class="mono" style="overflow-wrap:anywhere">${esc(d.url)}</td>
+        <td>${deliveryBadge(d)}</td>
         <td>${d.attempts}</td>
         <td class="error-text">${esc(d.last_error || '')}</td>
-        <td class="muted">${fmtRelative(d.next_attempt_at)}</td>
-        <td>${queueButtons(d.id)}</td>
+        <td class="muted">${nextAttemptText(d)}</td>
+        <td>${queueButtons(d)}</td>
       </tr>`).join('');
 }
 

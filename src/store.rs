@@ -36,6 +36,12 @@ pub struct Destination {
     pub endpoint_id: i64,
     pub url: String,
     pub enabled: bool,
+    /// 에러 응답을 받았을 때 다시 보낼 최대 횟수. `None`이면 성공할 때까지 계속 보낸다.
+    pub max_retries: Option<u32>,
+    /// 목적지가 응답하지 않기 시작한 시각. 이 동안은 보내지 않고 쌓아 두기만 한다.
+    pub down_since: Option<i64>,
+    /// 목적지 서버가 "다시 살아났다"고 알릴 때 쓰는 토큰
+    pub recover_token: String,
     pub created_at: i64,
 }
 
@@ -49,11 +55,15 @@ pub struct EndpointSummary {
     pub last_received_at: Option<i64>,
 }
 
-/// 재시도 작업이 처리할 전달 한 건
+/// 워커가 처리할 전달 한 건
 #[derive(Debug, Clone)]
 pub struct Job {
     pub delivery_id: i64,
+    pub destination_id: i64,
     pub attempts: u32,
+    /// 목적지가 에러로 응답한 횟수 (응답이 아예 없었던 시도는 세지 않는다)
+    pub error_responses: u32,
+    pub max_retries: Option<u32>,
     pub url: String,
     pub webhook: Webhook,
 }
@@ -69,6 +79,7 @@ pub struct EventSummary {
     pub body_size: i64,
     pub delivered: i64,
     pub pending: i64,
+    pub failed: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -78,6 +89,7 @@ pub struct DeliveryInfo {
     pub endpoint_name: String,
     pub destination_id: i64,
     pub url: String,
+    /// `pending`(보내는 중/재시도 대기), `delivered`(성공), `failed`(재시도 횟수 초과)
     pub state: String,
     pub attempts: u32,
     pub last_status: Option<u16>,
@@ -85,6 +97,8 @@ pub struct DeliveryInfo {
     pub next_attempt_at: Option<i64>,
     pub delivered_at: Option<i64>,
     pub created_at: i64,
+    /// 목적지가 응답 없음 상태라서 복구 알림을 기다리는 중인지
+    pub destination_down: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -100,11 +114,15 @@ pub struct EventDetail {
 pub struct Stats {
     pub endpoints: i64,
     pub destinations: i64,
+    /// 응답 없음 상태인 목적지 수
+    pub down_destinations: i64,
     pub events_24h: i64,
     pub delivered_24h: i64,
     pub pending: i64,
-    /// 한 번 이상 실패해서 재시도를 기다리는 전달 수
+    /// 에러 응답을 받아 재시도를 기다리는 전달 수
     pub retrying: i64,
+    /// 재시도 횟수를 다 써서 멈춘 전달 수
+    pub failed: i64,
 }
 
 #[derive(Clone)]
@@ -168,6 +186,7 @@ impl Store {
              CREATE INDEX IF NOT EXISTS idx_deliveries_destination ON deliveries (destination_id);
              CREATE INDEX IF NOT EXISTS idx_deliveries_due ON deliveries (state, next_attempt_at);",
         )?;
+        migrate(&conn)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -233,7 +252,7 @@ impl Store {
                     "SELECT ep.id, ep.name, ep.slug, ep.created_at,
                         (SELECT COUNT(*) FROM events WHERE endpoint_id = ep.id),
                         (SELECT COUNT(*) FROM deliveries d JOIN events e ON e.id = d.event_id
-                          WHERE e.endpoint_id = ep.id AND d.state = 'pending'),
+                          WHERE e.endpoint_id = ep.id AND d.state != 'delivered'),
                         (SELECT MAX(received_at) FROM events WHERE endpoint_id = ep.id)
                      FROM endpoints ep ORDER BY ep.id",
                 )?
@@ -254,13 +273,14 @@ impl Store {
                 .collect::<rusqlite::Result<Vec<_>>>()?;
 
             let destinations = c
-                .prepare(
-                    "SELECT id, endpoint_id, url, enabled, created_at FROM destinations ORDER BY id",
-                )?
+                .prepare(&format!("{DESTINATION_SELECT} ORDER BY id"))?
                 .query_map([], destination_from_row)?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             for d in destinations {
-                if let Some(ep) = endpoints.iter_mut().find(|e| e.endpoint.id == d.endpoint_id) {
+                if let Some(ep) = endpoints
+                    .iter_mut()
+                    .find(|e| e.endpoint.id == d.endpoint_id)
+                {
                     ep.destinations.push(d);
                 }
             }
@@ -303,6 +323,8 @@ impl Store {
         &self,
         endpoint_id: i64,
         url: String,
+        max_retries: Option<u32>,
+        recover_token: String,
     ) -> Result<Option<Destination>> {
         self.with_conn(move |c| {
             let exists = c
@@ -318,14 +340,18 @@ impl Store {
             }
             let created_at = now_ms();
             c.execute(
-                "INSERT INTO destinations (endpoint_id, url, created_at) VALUES (?1, ?2, ?3)",
-                params![endpoint_id, url, created_at],
+                "INSERT INTO destinations (endpoint_id, url, max_retries, recover_token, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![endpoint_id, url, max_retries, recover_token, created_at],
             )?;
             Ok(Some(Destination {
                 id: c.last_insert_rowid(),
                 endpoint_id,
                 url,
                 enabled: true,
+                max_retries,
+                down_since: None,
+                recover_token,
                 created_at,
             }))
         })
@@ -343,10 +369,45 @@ impl Store {
         .await
     }
 
+    pub async fn set_max_retries(&self, id: i64, max_retries: Option<u32>) -> Result<bool> {
+        self.with_conn(move |c| {
+            c.execute(
+                "UPDATE destinations SET max_retries = ?2 WHERE id = ?1",
+                params![id, max_retries],
+            )
+            .map(|n| n > 0)
+        })
+        .await
+    }
+
     pub async fn delete_destination(&self, id: i64) -> Result<bool> {
         self.with_conn(move |c| {
             c.execute("DELETE FROM destinations WHERE id = ?1", [id])
                 .map(|n| n > 0)
+        })
+        .await
+    }
+
+    /// 목적지가 다시 살아났다고 표시하고, 쌓아 둔 전달을 바로 보내도록 한다.
+    /// 목적지가 없으면 `None`, 있으면 바로 보낼 전달 수를 돌려준다.
+    pub async fn mark_destination_alive(&self, id: i64) -> Result<Option<usize>> {
+        self.with_conn(move |c| set_alive(c, id)).await
+    }
+
+    /// 복구 토큰으로 목적지를 찾아 살아났다고 표시한다. 돌려주는 값은 `(목적지 id, 보낼 전달 수)`.
+    pub async fn mark_alive_by_token(&self, token: String) -> Result<Option<(i64, usize)>> {
+        self.with_conn(move |c| {
+            let Some(id) = c
+                .query_row(
+                    "SELECT id FROM destinations WHERE recover_token = ?1",
+                    [token],
+                    |r| r.get::<_, i64>(0),
+                )
+                .optional()?
+            else {
+                return Ok(None);
+            };
+            Ok(set_alive(c, id)?.map(|n| (id, n)))
         })
         .await
     }
@@ -409,29 +470,35 @@ impl Store {
     }
 
     /// 보낼 시각이 된 전달을 가져오면서 `lease_until`까지 다른 쪽에서 다시 집어가지 않도록 잡아 둔다.
+    /// 꺼져 있거나 응답 없음 상태인 목적지로 가는 전달은 가져오지 않는다.
     pub async fn claim_due(&self, now: i64, limit: usize, lease_until: i64) -> Result<Vec<Job>> {
         self.with_conn(move |c| {
             let tx = c.unchecked_transaction()?;
             let jobs = tx
                 .prepare(
-                    "SELECT d.id, d.attempts, dst.url, e.method, e.path_and_query, e.headers, e.body
+                    "SELECT d.id, d.destination_id, d.attempts, d.error_responses, dst.max_retries,
+                            dst.url, e.method, e.path_and_query, e.headers, e.body
                      FROM deliveries d
                      JOIN destinations dst ON dst.id = d.destination_id
                      JOIN events e ON e.id = d.event_id
-                     WHERE d.state = 'pending' AND dst.enabled = 1 AND d.next_attempt_at <= ?1
+                     WHERE d.state = 'pending' AND d.next_attempt_at <= ?1
+                       AND dst.enabled = 1 AND dst.down_since IS NULL
                      ORDER BY d.next_attempt_at, d.id
                      LIMIT ?2",
                 )?
                 .query_map(params![now, limit as i64], |r| {
                     Ok(Job {
                         delivery_id: r.get(0)?,
-                        attempts: r.get(1)?,
-                        url: r.get(2)?,
+                        destination_id: r.get(1)?,
+                        attempts: r.get(2)?,
+                        error_responses: r.get(3)?,
+                        max_retries: r.get(4)?,
+                        url: r.get(5)?,
                         webhook: Webhook {
-                            method: r.get(3)?,
-                            path_and_query: r.get(4)?,
-                            headers: decode_headers(&r.get::<_, Vec<u8>>(5)?),
-                            body: Bytes::from(r.get::<_, Vec<u8>>(6)?),
+                            method: r.get(6)?,
+                            path_and_query: r.get(7)?,
+                            headers: decode_headers(&r.get::<_, Vec<u8>>(8)?),
+                            body: Bytes::from(r.get::<_, Vec<u8>>(9)?),
                         },
                     })
                 })?
@@ -455,7 +522,7 @@ impl Store {
             c.query_row(
                 "SELECT MIN(d.next_attempt_at) FROM deliveries d
                  JOIN destinations dst ON dst.id = d.destination_id
-                 WHERE d.state = 'pending' AND dst.enabled = 1",
+                 WHERE d.state = 'pending' AND dst.enabled = 1 AND dst.down_since IS NULL",
                 [],
                 |r| r.get(0),
             )
@@ -477,31 +544,69 @@ impl Store {
         .await
     }
 
-    pub async fn mark_failed(
+    /// 목적지가 에러로 응답했다. `next_attempt_at`이 `None`이면 재시도 횟수를 다 쓴 것이므로 멈춘다.
+    pub async fn mark_error_response(
         &self,
         id: i64,
         attempts: u32,
-        next_attempt_at: i64,
+        error_responses: u32,
+        next_attempt_at: Option<i64>,
         status: Option<u16>,
         error: String,
     ) -> Result<()> {
         self.with_conn(move |c| {
             c.execute(
                 "UPDATE deliveries
-                 SET attempts = ?2, next_attempt_at = ?3, last_status = ?4, last_error = ?5
+                 SET state = CASE WHEN ?4 IS NULL THEN 'failed' ELSE 'pending' END,
+                     attempts = ?2, error_responses = ?3, next_attempt_at = ?4,
+                     last_status = ?5, last_error = ?6
                  WHERE id = ?1 AND state = 'pending'",
-                params![id, attempts, next_attempt_at, status, error],
+                params![
+                    id,
+                    attempts,
+                    error_responses,
+                    next_attempt_at,
+                    status,
+                    error
+                ],
             )
             .map(drop)
         })
         .await
     }
 
-    /// 대기 중인 전달을 지금 바로 다시 보내도록 한다.
+    /// 목적지가 아예 응답하지 않았다. 목적지를 응답 없음 상태로 바꾸고, 전달은 복구 알림이 올 때까지 쌓아 둔다.
+    pub async fn mark_unreachable(
+        &self,
+        id: i64,
+        destination_id: i64,
+        attempts: u32,
+        error: String,
+    ) -> Result<()> {
+        self.with_conn(move |c| {
+            let tx = c.unchecked_transaction()?;
+            let now = now_ms();
+            tx.execute(
+                "UPDATE deliveries
+                 SET attempts = ?2, next_attempt_at = ?3, last_status = NULL, last_error = ?4
+                 WHERE id = ?1 AND state = 'pending'",
+                params![id, attempts, now, error],
+            )?;
+            tx.execute(
+                "UPDATE destinations SET down_since = COALESCE(down_since, ?2) WHERE id = ?1",
+                params![destination_id, now],
+            )?;
+            tx.commit()
+        })
+        .await
+    }
+
+    /// 대기 중이거나 멈춘 전달을 지금 바로 다시 보내도록 한다.
     pub async fn retry_now(&self, id: i64) -> Result<bool> {
         self.with_conn(move |c| {
             c.execute(
-                "UPDATE deliveries SET next_attempt_at = ?2 WHERE id = ?1 AND state = 'pending'",
+                "UPDATE deliveries SET state = 'pending', next_attempt_at = ?2
+                 WHERE id = ?1 AND state IN ('pending', 'failed')",
                 params![id, now_ms()],
             )
             .map(|n| n > 0)
@@ -509,11 +614,11 @@ impl Store {
         .await
     }
 
-    /// 대기 중인 전달을 포기하고 지운다.
+    /// 아직 전달하지 못한 건을 포기하고 지운다.
     pub async fn delete_delivery(&self, id: i64) -> Result<bool> {
         self.with_conn(move |c| {
             c.execute(
-                "DELETE FROM deliveries WHERE id = ?1 AND state = 'pending'",
+                "DELETE FROM deliveries WHERE id = ?1 AND state IN ('pending', 'failed')",
                 [id],
             )
             .map(|n| n > 0)
@@ -553,8 +658,8 @@ impl Store {
                     |r| {
                         Ok((
                             event_summary_from_row(r)?,
-                            r.get::<_, Vec<u8>>(9)?,
                             r.get::<_, Vec<u8>>(10)?,
+                            r.get::<_, Vec<u8>>(11)?,
                         ))
                     },
                 )
@@ -581,11 +686,12 @@ impl Store {
         .await
     }
 
-    pub async fn list_pending(&self, limit: usize) -> Result<Vec<DeliveryInfo>> {
+    /// 아직 전달하지 못한 건 (대기 중 + 재시도 횟수를 다 써서 멈춘 것)
+    pub async fn list_undelivered(&self, limit: usize) -> Result<Vec<DeliveryInfo>> {
         self.with_conn(move |c| {
             c.prepare(&format!(
-                "{DELIVERY_SELECT} WHERE d.state = 'pending'
-                 ORDER BY d.next_attempt_at, d.id LIMIT ?1"
+                "{DELIVERY_SELECT} WHERE d.state IN ('pending', 'failed')
+                 ORDER BY d.state DESC, d.id LIMIT ?1"
             ))?
             .query_map([limit as i64], delivery_from_row)?
             .collect()
@@ -600,19 +706,23 @@ impl Store {
                 "SELECT
                     (SELECT COUNT(*) FROM endpoints),
                     (SELECT COUNT(*) FROM destinations),
+                    (SELECT COUNT(*) FROM destinations WHERE down_since IS NOT NULL),
                     (SELECT COUNT(*) FROM events WHERE received_at >= ?1),
                     (SELECT COUNT(*) FROM deliveries WHERE state = 'delivered' AND delivered_at >= ?1),
                     (SELECT COUNT(*) FROM deliveries WHERE state = 'pending'),
-                    (SELECT COUNT(*) FROM deliveries WHERE state = 'pending' AND attempts > 0)",
+                    (SELECT COUNT(*) FROM deliveries WHERE state = 'pending' AND error_responses > 0),
+                    (SELECT COUNT(*) FROM deliveries WHERE state = 'failed')",
                 [since],
                 |r| {
                     Ok(Stats {
                         endpoints: r.get(0)?,
                         destinations: r.get(1)?,
-                        events_24h: r.get(2)?,
-                        delivered_24h: r.get(3)?,
-                        pending: r.get(4)?,
-                        retrying: r.get(5)?,
+                        down_destinations: r.get(2)?,
+                        events_24h: r.get(3)?,
+                        delivered_24h: r.get(4)?,
+                        pending: r.get(5)?,
+                        retrying: r.get(6)?,
+                        failed: r.get(7)?,
                     })
                 },
             )
@@ -620,12 +730,13 @@ impl Store {
         .await
     }
 
-    /// `cutoff`보다 오래됐고 더 보낼 것이 없는 웹훅 기록을 지운다.
+    /// `cutoff`보다 오래됐고 모든 목적지에 전달이 끝난 웹훅 기록을 지운다.
     pub async fn prune(&self, cutoff: i64) -> Result<usize> {
         self.with_conn(move |c| {
             c.execute(
                 "DELETE FROM events WHERE received_at < ?1
-                 AND NOT EXISTS (SELECT 1 FROM deliveries d WHERE d.event_id = events.id AND d.state = 'pending')",
+                 AND NOT EXISTS (SELECT 1 FROM deliveries d
+                                 WHERE d.event_id = events.id AND d.state != 'delivered')",
                 [cutoff],
             )
         })
@@ -633,17 +744,71 @@ impl Store {
     }
 }
 
+/// 처음 만든 스키마 뒤로 추가된 컬럼들을 붙인다. `user_version`으로 어디까지 했는지 기록한다.
+fn migrate(c: &Connection) -> rusqlite::Result<()> {
+    let version: i64 = c.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    if version < 1 {
+        let tx = c.unchecked_transaction()?;
+        tx.execute_batch(
+            "ALTER TABLE destinations ADD COLUMN max_retries INTEGER;
+             ALTER TABLE destinations ADD COLUMN down_since INTEGER;
+             ALTER TABLE destinations ADD COLUMN recover_token TEXT;
+             ALTER TABLE deliveries ADD COLUMN error_responses INTEGER NOT NULL DEFAULT 0;",
+        )?;
+        // 이미 있던 목적지에도 복구 토큰을 만들어 준다.
+        let ids = tx
+            .prepare("SELECT id FROM destinations")?
+            .query_map([], |r| r.get::<_, i64>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for id in ids {
+            tx.execute(
+                "UPDATE destinations SET recover_token = ?2 WHERE id = ?1",
+                params![id, crate::random_hex(16)],
+            )?;
+        }
+        tx.execute_batch(
+            "CREATE UNIQUE INDEX idx_destinations_recover_token ON destinations (recover_token);
+             PRAGMA user_version = 1;",
+        )?;
+        tx.commit()?;
+    }
+    Ok(())
+}
+
+fn set_alive(c: &Connection, id: i64) -> rusqlite::Result<Option<usize>> {
+    let tx = c.unchecked_transaction()?;
+    if tx.execute(
+        "UPDATE destinations SET down_since = NULL WHERE id = ?1",
+        [id],
+    )? == 0
+    {
+        return Ok(None);
+    }
+    let queued = tx.execute(
+        "UPDATE deliveries SET next_attempt_at = ?2 WHERE destination_id = ?1 AND state = 'pending'",
+        params![id, now_ms()],
+    )?;
+    tx.commit()?;
+    Ok(Some(queued))
+}
+
+const DESTINATION_SELECT: &str = "SELECT id, endpoint_id, url, enabled, max_retries, down_since,
+        recover_token, created_at
+     FROM destinations";
+
 const EVENT_SUMMARY_SELECT: &str =
     "SELECT e.id, e.endpoint_id, ep.name, e.method, e.path_and_query,
         e.received_at, length(e.body),
         (SELECT COUNT(*) FROM deliveries WHERE event_id = e.id AND state = 'delivered'),
         (SELECT COUNT(*) FROM deliveries WHERE event_id = e.id AND state = 'pending'),
+        (SELECT COUNT(*) FROM deliveries WHERE event_id = e.id AND state = 'failed'),
         e.headers, e.body
      FROM events e JOIN endpoints ep ON ep.id = e.endpoint_id";
 
 const DELIVERY_SELECT: &str =
     "SELECT d.id, d.event_id, ep.name, d.destination_id, dst.url, d.state,
-        d.attempts, d.last_status, d.last_error, d.next_attempt_at, d.delivered_at, d.created_at
+        d.attempts, d.last_status, d.last_error, d.next_attempt_at, d.delivered_at, d.created_at,
+        dst.down_since IS NOT NULL
      FROM deliveries d
      JOIN destinations dst ON dst.id = d.destination_id
      JOIN events e ON e.id = d.event_id
@@ -671,7 +836,10 @@ fn destination_from_row(r: &Row) -> rusqlite::Result<Destination> {
         endpoint_id: r.get(1)?,
         url: r.get(2)?,
         enabled: r.get(3)?,
-        created_at: r.get(4)?,
+        max_retries: r.get(4)?,
+        down_since: r.get(5)?,
+        recover_token: r.get(6)?,
+        created_at: r.get(7)?,
     })
 }
 
@@ -686,6 +854,7 @@ fn event_summary_from_row(r: &Row) -> rusqlite::Result<EventSummary> {
         body_size: r.get(6)?,
         delivered: r.get(7)?,
         pending: r.get(8)?,
+        failed: r.get(9)?,
     })
 }
 
@@ -703,6 +872,7 @@ fn delivery_from_row(r: &Row) -> rusqlite::Result<DeliveryInfo> {
         next_attempt_at: r.get(9)?,
         delivered_at: r.get(10)?,
         created_at: r.get(11)?,
+        destination_down: r.get(12)?,
     })
 }
 
@@ -758,20 +928,20 @@ mod tests {
         }
     }
 
+    async fn destination(store: &Store, endpoint_id: i64, url: &str) -> Destination {
+        store
+            .add_destination(endpoint_id, url.into(), None, crate::random_hex(16))
+            .await
+            .unwrap()
+            .unwrap()
+    }
+
     #[tokio::test]
     async fn claim_leases_jobs_and_skips_disabled_destinations() {
         let store = Store::open_in_memory().unwrap();
         let ep = store.create_endpoint("a".into(), "a".into()).await.unwrap();
-        let d1 = store
-            .add_destination(ep.id, "http://one".into())
-            .await
-            .unwrap()
-            .unwrap();
-        let d2 = store
-            .add_destination(ep.id, "http://two".into())
-            .await
-            .unwrap()
-            .unwrap();
+        let d1 = destination(&store, ep.id, "http://one").await;
+        let d2 = destination(&store, ep.id, "http://two").await;
         store
             .insert_event(ep.id, webhook(), vec![d1.id, d2.id])
             .await
@@ -793,14 +963,104 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unreachable_destination_holds_deliveries_until_alive() {
+        let store = Store::open_in_memory().unwrap();
+        let ep = store.create_endpoint("a".into(), "a".into()).await.unwrap();
+        let d = destination(&store, ep.id, "http://one").await;
+        store
+            .insert_event(ep.id, webhook(), vec![d.id])
+            .await
+            .unwrap();
+
+        let now = now_ms();
+        let job = store
+            .claim_due(now, 10, now + 60_000)
+            .await
+            .unwrap()
+            .remove(0);
+        store
+            .mark_unreachable(job.delivery_id, d.id, 1, "connect refused".into())
+            .await
+            .unwrap();
+        // 응답 없음 상태에서는 새로 들어온 것도 보내지 않는다
+        store
+            .insert_event(ep.id, webhook(), vec![d.id])
+            .await
+            .unwrap();
+        assert!(
+            store
+                .claim_due(now_ms(), 10, now + 60_000)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(store.next_due().await.unwrap(), None);
+        assert_eq!(store.stats().await.unwrap().down_destinations, 1);
+
+        assert_eq!(
+            store
+                .mark_alive_by_token(d.recover_token.clone())
+                .await
+                .unwrap(),
+            Some((d.id, 2))
+        );
+        assert_eq!(
+            store
+                .claim_due(now_ms(), 10, now + 60_000)
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            store.mark_alive_by_token("nope".into()).await.unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn error_response_without_next_attempt_marks_failed() {
+        let store = Store::open_in_memory().unwrap();
+        let ep = store.create_endpoint("a".into(), "a".into()).await.unwrap();
+        let d = destination(&store, ep.id, "http://one").await;
+        let event = store
+            .insert_event(ep.id, webhook(), vec![d.id])
+            .await
+            .unwrap();
+        let now = now_ms();
+        let job = store
+            .claim_due(now, 10, now + 60_000)
+            .await
+            .unwrap()
+            .remove(0);
+        store
+            .mark_error_response(job.delivery_id, 1, 1, None, Some(500), "500".into())
+            .await
+            .unwrap();
+
+        let stats = store.stats().await.unwrap();
+        assert_eq!((stats.pending, stats.failed), (0, 1));
+        // 다 보내지 못한 웹훅은 보관 기간이 지나도 지우지 않는다
+        assert_eq!(store.prune(now_ms() + 1).await.unwrap(), 0);
+
+        assert!(store.retry_now(job.delivery_id).await.unwrap());
+        assert_eq!(
+            store
+                .get_event(event)
+                .await
+                .unwrap()
+                .unwrap()
+                .summary
+                .pending,
+            1
+        );
+    }
+
+    #[tokio::test]
     async fn prune_keeps_events_with_pending_deliveries() {
         let store = Store::open_in_memory().unwrap();
         let ep = store.create_endpoint("a".into(), "a".into()).await.unwrap();
-        let d = store
-            .add_destination(ep.id, "http://one".into())
-            .await
-            .unwrap()
-            .unwrap();
+        let d = destination(&store, ep.id, "http://one").await;
         let pending = store
             .insert_event(ep.id, webhook(), vec![d.id])
             .await
@@ -810,5 +1070,30 @@ mod tests {
         assert_eq!(store.prune(now_ms() + 1).await.unwrap(), 1);
         assert!(store.get_event(pending).await.unwrap().is_some());
         assert!(store.get_event(done).await.unwrap().is_none());
+    }
+
+    #[test]
+    fn migrates_v0_database() {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(
+            "CREATE TABLE endpoints (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL,
+                 slug TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL);
+             CREATE TABLE destinations (id INTEGER PRIMARY KEY AUTOINCREMENT, endpoint_id INTEGER NOT NULL,
+                 url TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL);
+             INSERT INTO endpoints VALUES (1, 'a', 'a', 0);
+             INSERT INTO destinations (endpoint_id, url, created_at) VALUES (1, 'http://x', 0);",
+        )
+        .unwrap();
+        let store = Store::init(c).unwrap();
+        let conn = store.conn.lock().unwrap();
+        let (token, max): (String, Option<u32>) = conn
+            .query_row(
+                "SELECT recover_token, max_retries FROM destinations",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(token.len(), 32);
+        assert_eq!(max, None);
     }
 }
