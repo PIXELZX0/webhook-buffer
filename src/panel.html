@@ -47,16 +47,47 @@
   .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
   .row.between { justify-content: space-between; }
   .grow { flex: 1; min-width: 180px; }
-  .endpoint-head h3 { margin: 0; font-size: 15px; }
-  .url { display: flex; gap: 6px; align-items: center; margin: 8px 0 12px; background: var(--code);
-         border-radius: 6px; padding: 6px 6px 6px 10px; overflow: hidden; }
+  /* 엔드포인트 → 목적지 흐름: 왼쪽 엔드포인트 노드에서 선이 나와 갈라져 오른쪽 목적지 노드로 이어진다 */
+  .flow { display: grid; grid-template-columns: minmax(240px, 300px) minmax(0, 1fr); column-gap: 28px; align-items: center;
+          --line: color-mix(in srgb, var(--muted) 60%, transparent); }
+  .node { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; position: relative; }
+  .flow-source { position: relative; border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 12%, transparent); }
+  .flow-source::after { content: ""; position: absolute; top: 50%; right: -29px; width: 28px; height: 2px; background: var(--line); }
+  .flow-source h3 { margin: 0; font-size: 15px; }
+  .flow-source .actions { margin-top: 10px; }
+  .flow-targets { padding-left: 28px; }
+  .branch { position: relative; padding: 5px 0; --branch: var(--line); }
+  .branch.ok { --branch: var(--ok); }
+  .branch.down { --branch: var(--bad); }
+  .branch::before { content: ""; position: absolute; top: 50%; left: -28px; width: 28px; height: 0; border-top: 2px solid var(--branch); }
+  .branch.off::before, .branch.add::before { border-top-style: dashed; }
+  .branch::after { content: ""; position: absolute; left: -28px; top: 0; bottom: 0; width: 2px; background: var(--line); }
+  .branch:first-child::after { top: calc(50% - 1px); }
+  .branch:last-child::after { bottom: calc(50% - 1px); }
+  .branch:only-child::after { display: none; }
+  .branch .node::before { content: ""; position: absolute; left: -6px; top: calc(50% - 4px); width: 0; height: 0;
+                          border: 5px solid transparent; border-left-color: var(--branch); border-right: 0; }
+  .branch.down .node { border-color: color-mix(in srgb, var(--bad) 45%, var(--border)); }
+  .branch.add .node { border-style: dashed; background: transparent; padding: 8px 10px; }
+  .url { display: flex; gap: 6px; align-items: center; margin: 8px 0 0; background: var(--code);
+         border-radius: 6px; padding: 5px 5px 5px 9px; overflow: hidden; }
   .url span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .dest { display: flex; gap: 8px; align-items: flex-start; padding: 9px 0; border-top: 1px solid var(--border); flex-wrap: wrap; }
-  .dest-main { flex: 1; min-width: 220px; }
+  .dest { display: flex; gap: 8px; align-items: flex-start; flex-wrap: wrap; }
+  .dest-main { flex: 1; min-width: min(220px, 100%); }
   .dest-main .mono { overflow-wrap: anywhere; }
   .dest.off .dest-main > .row .mono { color: var(--muted); text-decoration: line-through; }
   .dest-meta { color: var(--muted); font-size: 12.5px; margin-top: 4px; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
-  .dest-meta code { background: var(--code); border-radius: 4px; padding: 1px 6px; overflow-wrap: anywhere; }
+  .dest-meta code { background: var(--code); border-radius: 4px; padding: 1px 6px; flex: 1 1 160px; min-width: 0;
+                    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .flow-source .url span { white-space: normal; word-break: break-all; }
+  @media (max-width: 720px) {
+    .flow { grid-template-columns: minmax(0, 1fr); row-gap: 16px; }
+    .flow-source::after { top: 100%; right: auto; left: 15px; width: 2px; height: 17px; }
+    .flow-targets { margin-left: 15px; padding-left: 24px; }
+    .branch::before { left: -24px; width: 24px; }
+    .branch::after, .branch:first-child::after { left: -24px; top: 0; }
+    .branch:only-child::after { display: block; bottom: calc(50% - 1px); }
+  }
   input.retry { width: 72px; padding: 2px 6px; font-size: 12.5px; }
   table { width: 100%; border-collapse: collapse; }
   th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
@@ -330,42 +361,48 @@ function renderEndpoints() {
     return;
   }
   list.innerHTML = endpoints.map((e) => `
-    <div class="card">
-      <div class="row between endpoint-head">
-        <div>
-          <h3>${esc(e.name)}</h3>
-          <span class="muted">웹훅 ${e.event_count.toLocaleString()}건 · 마지막 수신 ${fmtRelative(e.last_received_at)}
-            ${e.pending_count > 0 ? ` · <span class="badge warn">대기 ${e.pending_count}</span>` : ''}</span>
-        </div>
-        <div class="row">
-          <button class="small" data-action="show-events" data-id="${e.id}">웹훅 보기</button>
-          <button class="small danger" data-action="delete-endpoint" data-id="${e.id}">삭제</button>
+    <div class="card flow">
+      <div class="node flow-source">
+        <h3>${esc(e.name)}</h3>
+        <div class="muted" style="font-size:12.5px">웹훅 ${e.event_count.toLocaleString()}건 · 마지막 수신 ${fmtRelative(e.last_received_at)}
+          ${e.pending_count > 0 ? ` · <span class="badge warn">대기 ${e.pending_count}</span>` : ''}</div>
+        <div class="url mono"><span>${esc(hookUrl(e.slug))}</span><button class="small" data-action="copy" data-text="${esc(hookUrl(e.slug))}">복사</button></div>
+        <div class="row between actions">
+          <span class="muted" style="font-size:12.5px">목적지 ${e.destinations.length}개로 전달</span>
+          <div class="row">
+            <button class="small" data-action="show-events" data-id="${e.id}">웹훅 보기</button>
+            <button class="small danger" data-action="delete-endpoint" data-id="${e.id}">삭제</button>
+          </div>
         </div>
       </div>
-      <div class="url mono"><span>${esc(hookUrl(e.slug))}</span><button class="small" data-action="copy" data-text="${esc(hookUrl(e.slug))}">복사</button></div>
-      <div class="muted" style="font-size:12.5px;margin-bottom:4px">목적지 ${e.destinations.length}개 — 받은 웹훅을 아래 모든 목적지로 보냅니다</div>
-      ${e.destinations.map((d) => `
-        <div class="dest ${d.enabled ? '' : 'off'}">
-          <div class="dest-main">
-            <div class="row"><span class="mono">${esc(d.url)}</span>${destinationBadge(d)}</div>
-            <div class="dest-meta">
-              <label>재시도 <input class="retry" type="number" min="0" data-retry="${d.id}" value="${d.max_retries ?? ''}" placeholder="무제한"> 회</label>
-              <span>·</span>
-              <span>복구 알림</span><code>POST ${esc(aliveUrl(d.recover_token))}</code>
-              <button class="small" data-action="copy" data-text="${esc(aliveUrl(d.recover_token))}">복사</button>
+      <div class="flow-targets">
+        ${e.destinations.map((d) => `
+          <div class="branch ${!d.enabled ? 'off' : d.down_since ? 'down' : 'ok'}">
+            <div class="node dest ${d.enabled ? '' : 'off'}">
+              <div class="dest-main">
+                <div class="row"><span class="mono">${esc(d.url)}</span>${destinationBadge(d)}</div>
+                <div class="dest-meta">
+                  <label>재시도 <input class="retry" type="number" min="0" data-retry="${d.id}" value="${d.max_retries ?? ''}" placeholder="무제한"> 회</label>
+                  <span>·</span>
+                  <span>복구 알림</span><code title="POST ${esc(aliveUrl(d.recover_token))}">POST ${esc(aliveUrl(d.recover_token))}</code>
+                  <button class="small" data-action="copy" data-text="${esc(aliveUrl(d.recover_token))}">복사</button>
+                </div>
+              </div>
+              <div class="row">
+                ${d.down_since ? `<button class="small" data-action="alive" data-id="${d.id}">살아남 처리</button>` : ''}
+                <button class="small" data-action="toggle-dest" data-id="${d.id}" data-enabled="${d.enabled}">${d.enabled ? '끄기' : '켜기'}</button>
+                <button class="small danger" data-action="delete-dest" data-id="${d.id}">삭제</button>
+              </div>
             </div>
-          </div>
-          <div class="row">
-            ${d.down_since ? `<button class="small" data-action="alive" data-id="${d.id}">살아남 처리</button>` : ''}
-            <button class="small" data-action="toggle-dest" data-id="${d.id}" data-enabled="${d.enabled}">${d.enabled ? '끄기' : '켜기'}</button>
-            <button class="small danger" data-action="delete-dest" data-id="${d.id}">삭제</button>
-          </div>
-        </div>`).join('')}
-      <form class="row" data-action="add-dest" data-id="${e.id}" style="margin-top:8px">
-        <input class="grow mono" type="url" data-dest-input="${e.id}" placeholder="https://example.com/webhook" required>
-        <label class="muted" style="font-size:12.5px">재시도 <input class="retry" type="number" min="0" name="retries" value="10" placeholder="무제한"> 회</label>
-        <button>목적지 추가</button>
-      </form>
+          </div>`).join('')}
+        <div class="branch add">
+          <form class="node row" data-action="add-dest" data-id="${e.id}">
+            <input class="grow mono" type="url" data-dest-input="${e.id}" placeholder="https://example.com/webhook" required>
+            <label class="muted" style="font-size:12.5px">재시도 <input class="retry" type="number" min="0" name="retries" value="10" placeholder="무제한"> 회</label>
+            <button>목적지 추가</button>
+          </form>
+        </div>
+      </div>
     </div>`).join('');
 
   list.querySelectorAll('input[data-dest-input]').forEach((i) => {
