@@ -221,8 +221,12 @@ function toast(msg) {
   toast.t = setTimeout(() => el.classList.remove('show'), 2200);
 }
 
+// 리버스 프록시가 하위 경로(/buffer/ 등)에 붙여도 동작하도록 모든 주소를 패널이 열린 경로 기준으로 만든다.
+// 패널은 루트에서만 서빙하므로 경로가 '/'로 끝나지 않으면 슬래시를 빠뜨린 접두사로 본다.
+const BASE = location.origin + location.pathname.replace(/\/?$/, '/');
+
 async function api(path, opts = {}) {
-  const res = await fetch('/api' + path, {
+  const res = await fetch(BASE + 'api' + path, {
     ...opts,
     headers: { 'Authorization': 'Bearer ' + token, ...(opts.body ? { 'Content-Type': 'application/json' } : {}) },
   });
@@ -250,8 +254,8 @@ function fmtSize(n) {
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
   return `${(n / 1024 / 1024).toFixed(1)} MB`;
 }
-function hookUrl(slug) { return `${location.origin}/h/${slug}`; }
-function aliveUrl(token) { return `${location.origin}/d/${token}/alive`; }
+function hookUrl(slug) { return `${BASE}h/${slug}`; }
+function aliveUrl(token) { return `${BASE}d/${token}/alive`; }
 
 function eventBadge(e) {
   const total = e.delivered + e.pending + e.failed;
