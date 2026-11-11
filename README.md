@@ -1,3 +1,5 @@
+<img src="src/logo.svg" width="72" alt="Webhook Buffer 로고">
+
 # webhook-buffer
 
 웹훅을 받아서 등록해 둔 목적지들로 그대로 넘겨주는 작은 버퍼 서버입니다.

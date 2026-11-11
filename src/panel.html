@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Webhook Buffer</title>
+<link rel="icon" type="image/svg+xml" href="logo.svg">
 <style>
   :root {
     --bg: #f6f7f9; --panel: #fff; --text: #1d2330; --muted: #6b7280; --border: #e3e6eb;
@@ -22,7 +23,9 @@
          font: 14px/1.5 system-ui, -apple-system, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif; }
   header { display: flex; align-items: center; justify-content: space-between;
            padding: 14px 24px; background: var(--panel); border-bottom: 1px solid var(--border); }
-  header h1 { font-size: 17px; margin: 0; }
+  header h1 { font-size: 17px; margin: 0; display: flex; align-items: center; gap: 10px; }
+  header h1 img { width: 28px; height: 28px; display: block; }
+  #login .brand { width: 56px; height: 56px; display: block; margin-bottom: 12px; }
   main { max-width: 1100px; margin: 0 auto; padding: 20px 16px 60px; }
   button, input, select { font: inherit; color: inherit; }
   input, select { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 7px 10px; }
@@ -118,12 +121,13 @@
 </head>
 <body>
 <header>
-  <h1>Webhook Buffer</h1>
+  <h1><img src="logo.svg" alt="">Webhook Buffer</h1>
   <button id="logout" class="small" hidden>로그아웃</button>
 </header>
 
 <main>
   <div id="login" class="card" hidden>
+    <img class="brand" src="logo.svg" alt="">
     <h2>관리자 토큰</h2>
     <p class="muted">서버의 <span class="mono">ADMIN_TOKEN</span> 값을 입력하세요. 설정하지 않았다면 서버 로그에 임시 토큰이 찍혀 있습니다.</p>
     <form id="login-form" class="row">

@@ -11,7 +11,7 @@ use axum::{
     Json, Router,
     body::Bytes,
     extract::{DefaultBodyLimit, Path, State},
-    http::{HeaderMap, Method, StatusCode, Uri},
+    http::{HeaderMap, Method, StatusCode, Uri, header},
     response::{Html, IntoResponse, Response},
     routing::{any, get},
 };
@@ -73,6 +73,7 @@ pub async fn run(
     };
     let app = Router::new()
         .route("/", get(panel))
+        .route("/logo.svg", get(logo))
         .route("/h/{slug}", any(ingest))
         .route("/h/{slug}/{*rest}", any(ingest))
         .route(
@@ -97,6 +98,16 @@ pub async fn run(
 
 async fn panel() -> Html<&'static str> {
     Html(include_str!("panel.html"))
+}
+
+async fn logo() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "image/svg+xml"),
+            (header::CACHE_CONTROL, "public, max-age=86400"),
+        ],
+        include_str!("logo.svg"),
+    )
 }
 
 /// 웹훅을 받아 디스크에 저장하고 목적지마다 전달 작업을 만든다.

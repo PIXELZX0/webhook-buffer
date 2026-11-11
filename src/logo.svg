@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Webhook Buffer">
+  <defs>
+    <linearGradient id="wb-bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#3b82f6"/>
+      <stop offset="1" stop-color="#1d4ed8"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="url(#wb-bg)"/>
+  <g fill="none" stroke="#fff" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round">
+    <!-- 들어오는 웹훅 -->
+    <path d="M8 32h8"/>
+    <!-- 목적지로 갈라져 나가는 전달 -->
+    <path d="M42 32c7 0 6-11 13-11"/>
+    <path d="M42 32c7 0 6 11 13 11"/>
+    <path d="M51.5 17.5 55 21l-3.5 3.5"/>
+    <path d="M51.5 39.5 55 43l-3.5 3.5"/>
+  </g>
+  <!-- 버퍼에 쌓인 웹훅 -->
+  <g fill="#fff">
+    <rect x="19" y="17" width="20" height="8" rx="2.5" opacity=".5"/>
+    <rect x="19" y="28" width="20" height="8" rx="2.5" opacity=".75"/>
+    <rect x="19" y="39" width="20" height="8" rx="2.5"/>
+  </g>
+</svg>
