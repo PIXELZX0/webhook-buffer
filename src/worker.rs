@@ -177,7 +177,10 @@ impl Worker {
         };
         if let Err(e) = result {
             // 상태를 못 남겨도 잡아 둔 시간이 지나면 다시 보내므로 웹훅은 사라지지 않는다.
-            warn!(delivery = job.delivery_id, "failed to save delivery state: {e:#}");
+            warn!(
+                delivery = job.delivery_id,
+                "failed to save delivery state: {e:#}"
+            );
         }
     }
 }

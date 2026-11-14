@@ -48,5 +48,6 @@ where
     T::Err: std::error::Error + Send + Sync + 'static,
 {
     let raw = env::var(key).unwrap_or_else(|_| default.to_string());
-    raw.parse().with_context(|| format!("cannot parse {key}: {raw}"))
+    raw.parse()
+        .with_context(|| format!("cannot parse {key}: {raw}"))
 }

@@ -95,7 +95,10 @@ impl Forwarder {
         if status.is_success() {
             Ok(status.as_u16())
         } else {
-            Err(fail(Some(status.as_u16()), format!("destination responded {status}")))
+            Err(fail(
+                Some(status.as_u16()),
+                format!("destination responded {status}"),
+            ))
         }
     }
 }

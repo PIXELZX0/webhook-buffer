@@ -167,7 +167,9 @@ async fn add_destination(
     match reqwest::Url::parse(&url) {
         Ok(u) if matches!(u.scheme(), "http" | "https") => {}
         _ => {
-            return Err(ApiError::bad_request("URL must start with http:// or https://"));
+            return Err(ApiError::bad_request(
+                "URL must start with http:// or https://",
+            ));
         }
     }
     let max_retries = body.max_retries.unwrap_or(Some(DEFAULT_MAX_RETRIES));

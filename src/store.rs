@@ -223,7 +223,8 @@ impl Store {
 
     /// DB가 쿼리에 응답하는지 확인한다. 헬스체크용.
     pub async fn ping(&self) -> Result<()> {
-        self.with_conn(|c| c.query_row("SELECT 1", [], |_| Ok(()))).await
+        self.with_conn(|c| c.query_row("SELECT 1", [], |_| Ok(())))
+            .await
     }
 
     // ---------- 엔드포인트 / 목적지 ----------

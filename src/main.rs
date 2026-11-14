@@ -49,7 +49,11 @@ async fn check_health() -> Result<()> {
         .get(format!("http://{addr}/healthz"))
         .send()
         .await?;
-    anyhow::ensure!(resp.status().is_success(), "unhealthy response: {}", resp.status());
+    anyhow::ensure!(
+        resp.status().is_success(),
+        "unhealthy response: {}",
+        resp.status()
+    );
     Ok(())
 }
 
