@@ -9,14 +9,31 @@ use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
 use webhook_buffer::{config::Config, store::Store};
 
-#[tokio::main]
-async fn main() -> Result<ExitCode> {
+/// 요청 처리 스레드 수. 웹훅 중계는 대부분 I/O 대기라서 CPU 코어 수만큼 띄울 필요가 없다.
+const WORKER_THREADS: usize = 2;
+/// DB 작업과 DNS 조회에 쓰는 블로킹 스레드 최대 수 (tokio 기본값은 512).
+/// SQLite 연결 하나를 Mutex로 나눠 쓰므로 DB 쪽은 많이 띄워도 락에서 기다리기만 한다.
+const BLOCKING_THREADS: usize = 8;
+
+fn main() -> Result<ExitCode> {
     // `webhook-buffer healthcheck`: 떠 있는 서버의 /healthz를 찔러 보고 종료 코드로 알려 준다.
     // 이미지가 scratch라 curl이 없어서 Docker HEALTHCHECK가 이걸 쓴다.
     if std::env::args().nth(1).as_deref() == Some("healthcheck") {
-        return Ok(healthcheck().await);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        return Ok(rt.block_on(healthcheck()));
     }
 
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(WORKER_THREADS)
+        .max_blocking_threads(BLOCKING_THREADS)
+        .enable_all()
+        .build()?
+        .block_on(serve())
+}
+
+async fn serve() -> Result<ExitCode> {
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),

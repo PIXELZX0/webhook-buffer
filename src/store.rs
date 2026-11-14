@@ -673,22 +673,22 @@ impl Store {
 
     pub async fn get_event(&self, id: i64) -> Result<Option<EventDetail>> {
         self.with_conn(move |c| {
-            let Some((summary, headers, body)) = c
+            let Some(summary) = c
                 .query_row(
                     &format!("{EVENT_SUMMARY_SELECT} WHERE e.id = ?1"),
                     [id],
-                    |r| {
-                        Ok((
-                            event_summary_from_row(r)?,
-                            r.get::<_, Vec<u8>>(10)?,
-                            r.get::<_, Vec<u8>>(11)?,
-                        ))
-                    },
+                    event_summary_from_row,
                 )
                 .optional()?
             else {
                 return Ok(None);
             };
+            // 본문과 헤더는 큰 BLOB일 수 있어서 목록 쿼리에는 넣지 않고 상세 조회에서만 따로 읽는다.
+            let (headers, body): (Vec<u8>, Vec<u8>) = c.query_row(
+                "SELECT headers, body FROM events WHERE id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
             let deliveries = c
                 .prepare(&format!(
                     "{DELIVERY_SELECT} WHERE d.event_id = ?1 ORDER BY d.id"
@@ -701,7 +701,9 @@ impl Store {
                     .into_iter()
                     .map(|(k, v)| (k, String::from_utf8_lossy(&v).into_owned()))
                     .collect(),
-                body: String::from_utf8_lossy(&body).into_owned(),
+                // 올바른 UTF-8이면 복사하지 않고 그대로 넘긴다.
+                body: String::from_utf8(body)
+                    .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned()),
                 deliveries,
             }))
         })
@@ -823,8 +825,7 @@ const EVENT_SUMMARY_SELECT: &str =
         e.received_at, length(e.body),
         (SELECT COUNT(*) FROM deliveries WHERE event_id = e.id AND state = 'delivered'),
         (SELECT COUNT(*) FROM deliveries WHERE event_id = e.id AND state = 'pending'),
-        (SELECT COUNT(*) FROM deliveries WHERE event_id = e.id AND state = 'failed'),
-        e.headers, e.body
+        (SELECT COUNT(*) FROM deliveries WHERE event_id = e.id AND state = 'failed')
      FROM events e JOIN endpoints ep ON ep.id = e.endpoint_id";
 
 const DELIVERY_SELECT: &str =
