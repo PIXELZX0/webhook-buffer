@@ -125,6 +125,17 @@ pub struct Stats {
     pub failed: i64,
 }
 
+/// DB_PATH가 디렉터리를 가리키면(`/data/`처럼 `/`로 끝나거나 이미 있는 디렉터리)
+/// 그 안의 기본 파일 이름을 쓴다.
+fn resolve_db_path(path: &Path) -> std::path::PathBuf {
+    let s = path.as_os_str().to_string_lossy();
+    if s.ends_with('/') || s.ends_with(std::path::MAIN_SEPARATOR) || path.is_dir() {
+        path.join("webhook-buffer.db")
+    } else {
+        path.to_path_buf()
+    }
+}
+
 #[derive(Clone)]
 pub struct Store {
     conn: Arc<Mutex<Connection>>,
@@ -132,7 +143,12 @@ pub struct Store {
 
 impl Store {
     pub fn open(path: &Path) -> Result<Self> {
-        let conn = Connection::open(path)
+        let path = resolve_db_path(path);
+        if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+            std::fs::create_dir_all(dir)
+                .with_context(|| format!("DB 디렉터리를 만들 수 없습니다: {}", dir.display()))?;
+        }
+        let conn = Connection::open(&path)
             .with_context(|| format!("DB를 열 수 없습니다: {}", path.display()))?;
         Self::init(conn)
     }

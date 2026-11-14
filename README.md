@@ -111,7 +111,7 @@ curl -X POST localhost:8080/api/endpoints/1/destinations -H "Authorization: Bear
 | --- | --- | --- |
 | `ADMIN_TOKEN` | (임시 생성) | 웹 패널과 관리 API 토큰 |
 | `LISTEN_ADDR` | `0.0.0.0:8080` | 수신 주소 |
-| `DB_PATH` | `webhook-buffer.db` | SQLite 파일 |
+| `DB_PATH` | `webhook-buffer.db` | SQLite 파일. 없으면 상위 디렉터리까지 자동 생성, 디렉터리(`/data/`)를 주면 그 안에 `webhook-buffer.db` 생성 |
 | `REQUEST_TIMEOUT_SECS` | `10` | 목적지 요청 타임아웃 |
 | `MIN_BACKOFF_MS` | `1000` | 첫 재시도까지 대기 시간 |
 | `MAX_BACKOFF_SECS` | `300` | 재시도 간격 최댓값 |
