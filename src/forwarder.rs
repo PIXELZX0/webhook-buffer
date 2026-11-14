@@ -62,7 +62,7 @@ impl Forwarder {
         };
 
         let method = Method::from_bytes(webhook.method.as_bytes())
-            .map_err(|e| fail(None, format!("잘못된 메서드 {}: {e}", webhook.method)))?;
+            .map_err(|e| fail(None, format!("invalid method {}: {e}", webhook.method)))?;
         let url = build_url(destination, &webhook.path_and_query);
 
         let mut headers = HeaderMap::new();
@@ -88,14 +88,14 @@ impl Forwarder {
             .map_err(|e| SendError {
                 unreachable: true,
                 status: None,
-                message: format!("응답 없음: {e}"),
+                message: format!("no response: {e}"),
             })?;
 
         let status = resp.status();
         if status.is_success() {
             Ok(status.as_u16())
         } else {
-            Err(fail(Some(status.as_u16()), format!("목적지 응답 {status}")))
+            Err(fail(Some(status.as_u16()), format!("destination responded {status}")))
         }
     }
 }

@@ -46,7 +46,7 @@ pub async fn run(
         Some(t) => t,
         None => {
             let t = random_hex(16);
-            warn!("ADMIN_TOKEN이 없어서 임시 토큰을 만들었습니다 (재시작하면 바뀝니다): {t}");
+            warn!("ADMIN_TOKEN not set, generated a temporary token (changes on restart): {t}");
             t
         }
     };
@@ -74,6 +74,7 @@ pub async fn run(
     let app = Router::new()
         .route("/", get(panel))
         .route("/logo.svg", get(logo))
+        .route("/healthz", get(healthz))
         .route("/h/{slug}", any(ingest))
         .route("/h/{slug}/{*rest}", any(ingest))
         .route(
@@ -85,7 +86,7 @@ pub async fn run(
         .with_state(state);
 
     info!(
-        "{}에서 대기 중 (패널: /, 웹훅: /h/{{slug}}, 복구 알림: /d/{{token}}/alive)",
+        "listening on {} (panel: /, webhooks: /h/{{slug}}, recovery notice: /d/{{token}}/alive)",
         listener.local_addr()?
     );
     let result = axum::serve(listener, app)
@@ -108,6 +109,17 @@ async fn logo() -> impl IntoResponse {
         ],
         include_str!("logo.svg"),
     )
+}
+
+/// 헬스체크. 인증 없이 열려 있고, DB가 응답하면 200, 아니면 503을 돌려준다.
+async fn healthz(State(state): State<AppState>) -> Response {
+    match state.store.ping().await {
+        Ok(()) => (StatusCode::OK, "ok").into_response(),
+        Err(e) => {
+            error!("health check failed: {e:#}");
+            (StatusCode::SERVICE_UNAVAILABLE, "db unavailable").into_response()
+        }
+    }
 }
 
 /// 웹훅을 받아 디스크에 저장하고 목적지마다 전달 작업을 만든다.
@@ -133,7 +145,7 @@ async fn ingest(
         Ok(Some(found)) => found,
         Ok(None) => return (StatusCode::NOT_FOUND, "unknown endpoint").into_response(),
         Err(e) => {
-            error!("엔드포인트 조회 실패: {e:#}");
+            error!("failed to look up endpoint: {e:#}");
             return StatusCode::SERVICE_UNAVAILABLE.into_response();
         }
     };
@@ -164,7 +176,7 @@ async fn ingest(
         }
         Err(e) => {
             // 저장조차 못 했으면 보낸 쪽이 다시 보낼 수 있도록 에러를 돌려준다.
-            error!("웹훅 저장 실패: {e:#}");
+            error!("failed to store webhook: {e:#}");
             (StatusCode::SERVICE_UNAVAILABLE, "failed to buffer webhook").into_response()
         }
     }
@@ -177,14 +189,14 @@ async fn destination_alive(State(state): State<AppState>, Path(token): Path<Stri
         Ok(Some((id, queued))) => {
             info!(
                 destination = id,
-                queued, "목적지 복구 알림 받음, 쌓아 둔 웹훅을 보냅니다"
+                queued, "destination recovery notice received, sending held webhooks"
             );
             state.wake_worker.notify_one();
             Json(serde_json::json!({ "status": "ok", "queued": queued })).into_response()
         }
         Ok(None) => (StatusCode::NOT_FOUND, "unknown token").into_response(),
         Err(e) => {
-            error!("복구 알림 처리 실패: {e:#}");
+            error!("failed to handle recovery notice: {e:#}");
             StatusCode::SERVICE_UNAVAILABLE.into_response()
         }
     }

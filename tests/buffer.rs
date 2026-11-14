@@ -324,3 +324,16 @@ async fn unknown_endpoint_is_404_and_api_needs_token() {
     assert_eq!(resp.status(), 200);
     assert!(resp.text().await.unwrap().contains("Webhook Buffer"));
 }
+
+#[tokio::test]
+async fn healthz_is_open_without_token() {
+    let buffer = Buffer::spawn().await;
+    let resp = buffer
+        .client
+        .get(format!("{}/healthz", buffer.base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.text().await.unwrap(), "ok");
+}

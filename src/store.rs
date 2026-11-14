@@ -146,10 +146,10 @@ impl Store {
         let path = resolve_db_path(path);
         if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
             std::fs::create_dir_all(dir)
-                .with_context(|| format!("DB 디렉터리를 만들 수 없습니다: {}", dir.display()))?;
+                .with_context(|| format!("cannot create DB directory: {}", dir.display()))?;
         }
         let conn = Connection::open(&path)
-            .with_context(|| format!("DB를 열 수 없습니다: {}", path.display()))?;
+            .with_context(|| format!("cannot open DB: {}", path.display()))?;
         Self::init(conn)
     }
 
@@ -219,6 +219,11 @@ impl Store {
             f(&conn).map_err(Into::into)
         })
         .await?
+    }
+
+    /// DB가 쿼리에 응답하는지 확인한다. 헬스체크용.
+    pub async fn ping(&self) -> Result<()> {
+        self.with_conn(|c| c.query_row("SELECT 1", [], |_| Ok(()))).await
     }
 
     // ---------- 엔드포인트 / 목적지 ----------

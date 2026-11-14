@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="ko">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -122,17 +122,17 @@
 <body>
 <header>
   <h1><img src="logo.svg" alt="">Webhook Buffer</h1>
-  <button id="logout" class="small" hidden>로그아웃</button>
+  <button id="logout" class="small" hidden>Log out</button>
 </header>
 
 <main>
   <div id="login" class="card" hidden>
     <img class="brand" src="logo.svg" alt="">
-    <h2>관리자 토큰</h2>
-    <p class="muted">서버의 <span class="mono">ADMIN_TOKEN</span> 값을 입력하세요. 설정하지 않았다면 서버 로그에 임시 토큰이 찍혀 있습니다.</p>
+    <h2>Admin token</h2>
+    <p class="muted">Enter the server's <span class="mono">ADMIN_TOKEN</span>. If it isn't set, a temporary token is printed in the server log.</p>
     <form id="login-form" class="row">
-      <input id="token-input" type="password" class="grow" placeholder="토큰" autocomplete="current-password" required>
-      <button class="primary">들어가기</button>
+      <input id="token-input" type="password" class="grow" placeholder="Token" autocomplete="current-password" required>
+      <button class="primary">Sign in</button>
     </form>
     <p id="login-error" class="error-text"></p>
   </div>
@@ -141,40 +141,40 @@
     <section class="stats" id="stats"></section>
 
     <nav class="tabs">
-      <button data-tab="endpoints" class="active">엔드포인트</button>
-      <button data-tab="events">최근 웹훅</button>
-      <button data-tab="queue">재시도 대기열</button>
+      <button data-tab="endpoints" class="active">Endpoints</button>
+      <button data-tab="events">Recent webhooks</button>
+      <button data-tab="queue">Retry queue</button>
     </nav>
 
     <section id="tab-endpoints">
       <form id="new-endpoint" class="card row">
-        <input name="name" class="grow" placeholder="엔드포인트 이름 (예: GitHub)" required>
-        <input name="slug" placeholder="슬러그 (비우면 자동 생성)" pattern="[A-Za-z0-9_\-]{1,64}">
-        <button class="primary">엔드포인트 추가</button>
+        <input name="name" class="grow" placeholder="Endpoint name (e.g. GitHub)" required>
+        <input name="slug" placeholder="Slug (auto-generated if empty)" pattern="[A-Za-z0-9_\-]{1,64}">
+        <button class="primary">Add endpoint</button>
       </form>
       <div id="endpoint-list"></div>
     </section>
 
     <section id="tab-events" hidden>
       <div class="row" style="margin-bottom:12px">
-        <select id="event-filter"><option value="">모든 엔드포인트</option></select>
+        <select id="event-filter"><option value="">All endpoints</option></select>
       </div>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>#</th><th>받은 시각</th><th>엔드포인트</th><th>요청</th><th>크기</th><th>전달 상태</th></tr></thead>
+          <thead><tr><th>#</th><th>Received</th><th>Endpoint</th><th>Request</th><th>Size</th><th>Delivery</th></tr></thead>
           <tbody id="event-rows"></tbody>
         </table>
       </div>
       <div class="row" style="justify-content:center;margin-top:12px">
-        <button id="more-events" hidden>더 보기</button>
+        <button id="more-events" hidden>Load more</button>
       </div>
     </section>
 
     <section id="tab-queue" hidden>
-      <p class="muted" style="margin-top:0">아직 목적지에 전달하지 못한 웹훅입니다. 에러 응답은 목적지에 설정한 횟수만큼 다시 보내고, 아예 응답이 없으면 목적지가 복구 알림을 보낼 때까지 보관합니다.</p>
+      <p class="muted" style="margin-top:0">Webhooks not yet delivered. Error responses are retried as many times as the destination allows; if a destination doesn't respond at all, webhooks are held until it sends a recovery notice.</p>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>웹훅</th><th>엔드포인트</th><th>목적지</th><th>상태</th><th>시도</th><th>마지막 오류</th><th>다음 시도</th><th></th></tr></thead>
+          <thead><tr><th>Webhook</th><th>Endpoint</th><th>Destination</th><th>Status</th><th>Attempts</th><th>Last error</th><th>Next attempt</th><th></th></tr></thead>
           <tbody id="queue-rows"></tbody>
         </table>
       </div>
@@ -186,21 +186,21 @@
   <div class="row between">
     <h2 id="ev-title"></h2>
     <div class="row">
-      <button id="ev-replay" class="small">모든 목적지로 다시 보내기</button>
-      <button id="ev-close" class="small">닫기</button>
+      <button id="ev-replay" class="small">Resend to all destinations</button>
+      <button id="ev-close" class="small">Close</button>
     </div>
   </div>
   <p id="ev-meta" class="muted" style="margin:4px 0 0"></p>
-  <h4>목적지별 전달</h4>
+  <h4>Deliveries</h4>
   <div class="table-wrap">
     <table>
-      <thead><tr><th>목적지</th><th>상태</th><th>시도</th><th>응답 / 오류</th><th></th></tr></thead>
+      <thead><tr><th>Destination</th><th>Status</th><th>Attempts</th><th>Response / error</th><th></th></tr></thead>
       <tbody id="ev-deliveries"></tbody>
     </table>
   </div>
-  <h4>헤더</h4>
+  <h4>Headers</h4>
   <pre id="ev-headers" class="mono"></pre>
-  <h4>본문</h4>
+  <h4>Body</h4>
   <pre id="ev-body" class="mono"></pre>
 </dialog>
 
@@ -234,7 +234,7 @@ async function api(path, opts = {}) {
     ...opts,
     headers: { 'Authorization': 'Bearer ' + token, ...(opts.body ? { 'Content-Type': 'application/json' } : {}) },
   });
-  if (res.status === 401) { showLogin('토큰이 올바르지 않습니다'); throw new Error('unauthorized'); }
+  if (res.status === 401) { showLogin('Invalid token'); throw new Error('unauthorized'); }
   if (res.status === 204) return null;
   const data = await res.json().catch(() => null);
   if (!res.ok) throw new Error(data?.error || res.statusText);
@@ -243,15 +243,15 @@ async function api(path, opts = {}) {
 
 function fmtTime(ms) {
   if (!ms) return '-';
-  return new Date(ms).toLocaleString('ko-KR', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  return new Date(ms).toLocaleString('en-US', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
 function fmtRelative(ms) {
   if (!ms) return '-';
   const diff = Math.round((ms - Date.now()) / 1000);
   const abs = Math.abs(diff);
-  const text = abs < 60 ? `${abs}초` : abs < 3600 ? `${Math.round(abs / 60)}분` : abs < 86400 ? `${Math.round(abs / 3600)}시간` : `${Math.round(abs / 86400)}일`;
-  if (abs < 2) return '지금';
-  return diff > 0 ? `${text} 뒤` : `${text} 전`;
+  const text = abs < 60 ? `${abs}s` : abs < 3600 ? `${Math.round(abs / 60)}m` : abs < 86400 ? `${Math.round(abs / 3600)}h` : `${Math.round(abs / 86400)}d`;
+  if (abs < 2) return 'now';
+  return diff > 0 ? `in ${text}` : `${text} ago`;
 }
 function fmtSize(n) {
   if (n < 1024) return `${n} B`;
@@ -263,26 +263,26 @@ function aliveUrl(token) { return `${BASE}d/${token}/alive`; }
 
 function eventBadge(e) {
   const total = e.delivered + e.pending + e.failed;
-  if (total === 0) return '<span class="badge none">목적지 없음</span>';
-  if (e.failed > 0) return `<span class="badge bad">실패 ${e.failed}</span>${e.pending ? ` <span class="badge warn">대기 ${e.pending}</span>` : ''}`;
-  if (e.pending === 0) return `<span class="badge ok">전달 완료 ${e.delivered}/${total}</span>`;
-  return `<span class="badge warn">대기 ${e.pending} · 완료 ${e.delivered}</span>`;
+  if (total === 0) return '<span class="badge none">No destinations</span>';
+  if (e.failed > 0) return `<span class="badge bad">Failed ${e.failed}</span>${e.pending ? ` <span class="badge warn">Pending ${e.pending}</span>` : ''}`;
+  if (e.pending === 0) return `<span class="badge ok">Delivered ${e.delivered}/${total}</span>`;
+  return `<span class="badge warn">Pending ${e.pending} · Done ${e.delivered}</span>`;
 }
 function deliveryBadge(d) {
-  if (d.state === 'delivered') return '<span class="badge ok">전달 완료</span>';
-  if (d.state === 'failed') return '<span class="badge bad">실패 (재시도 초과)</span>';
-  if (d.destination_down) return '<span class="badge warn">응답 없음 · 보관 중</span>';
-  if (d.attempts === 0) return '<span class="badge none">전송 중</span>';
-  return '<span class="badge bad">재시도 중</span>';
+  if (d.state === 'delivered') return '<span class="badge ok">Delivered</span>';
+  if (d.state === 'failed') return '<span class="badge bad">Failed (retries exhausted)</span>';
+  if (d.destination_down) return '<span class="badge warn">Unreachable · held</span>';
+  if (d.attempts === 0) return '<span class="badge none">Sending</span>';
+  return '<span class="badge bad">Retrying</span>';
 }
 function destinationBadge(d) {
-  if (!d.enabled) return '<span class="badge none">꺼짐</span>';
-  if (d.down_since) return `<span class="badge bad">응답 없음 · ${fmtRelative(d.down_since)}부터</span>`;
-  return '<span class="badge ok">정상</span>';
+  if (!d.enabled) return '<span class="badge none">Disabled</span>';
+  if (d.down_since) return `<span class="badge bad">Unreachable since ${fmtRelative(d.down_since)}</span>`;
+  return '<span class="badge ok">Healthy</span>';
 }
 function nextAttemptText(d) {
   if (d.state === 'failed') return '-';
-  if (d.destination_down) return '복구 알림 후';
+  if (d.destination_down) return 'after recovery notice';
   return fmtRelative(d.next_attempt_at);
 }
 
@@ -310,7 +310,7 @@ async function start() {
   try {
     await refresh();
   } catch (e) {
-    if (e.message !== 'unauthorized') showLogin('서버에 연결할 수 없습니다');
+    if (e.message !== 'unauthorized') showLogin('Cannot reach the server');
     return;
   }
   $('#login').hidden = true;
@@ -336,9 +336,9 @@ async function refresh() {
 
 function renderStats(s) {
   const items = [
-    ['엔드포인트', s.endpoints], ['목적지', s.destinations], ['받은 웹훅 (24시간)', s.events_24h],
-    ['전달 성공 (24시간)', s.delivered_24h], ['전달 대기', s.pending, s.pending > 0], ['재시도 중', s.retrying, s.retrying > 0],
-    ['응답 없는 목적지', s.down_destinations, s.down_destinations > 0], ['실패 (재시도 초과)', s.failed, s.failed > 0],
+    ['Endpoints', s.endpoints], ['Destinations', s.destinations], ['Webhooks received (24h)', s.events_24h],
+    ['Delivered (24h)', s.delivered_24h], ['Pending', s.pending, s.pending > 0], ['Retrying', s.retrying, s.retrying > 0],
+    ['Unreachable destinations', s.down_destinations, s.down_destinations > 0], ['Failed (retries exhausted)', s.failed, s.failed > 0],
   ];
   $('#stats').innerHTML = items.map(([label, value, warn]) =>
     `<div class="stat ${warn ? 'warn' : ''}"><div class="label">${label}</div><div class="value">${value.toLocaleString()}</div></div>`).join('');
@@ -350,7 +350,7 @@ async function loadEndpoints() {
   renderEndpoints();
   const filter = $('#event-filter');
   const selected = filter.value;
-  filter.innerHTML = '<option value="">모든 엔드포인트</option>' +
+  filter.innerHTML = '<option value="">All endpoints</option>' +
     endpoints.map((e) => `<option value="${e.id}">${esc(e.name)}</option>`).join('');
   filter.value = endpoints.some((e) => String(e.id) === selected) ? selected : '';
 }
@@ -365,21 +365,21 @@ function renderEndpoints() {
   const focused = document.activeElement?.dataset?.destInput;
 
   if (endpoints.length === 0) {
-    list.innerHTML = '<div class="card empty">아직 엔드포인트가 없습니다. 위에서 하나 만들어 보세요.</div>';
+    list.innerHTML = '<div class="card empty">No endpoints yet. Create one above.</div>';
     return;
   }
   list.innerHTML = endpoints.map((e) => `
     <div class="card flow">
       <div class="node flow-source">
         <h3>${esc(e.name)}</h3>
-        <div class="muted" style="font-size:12.5px">웹훅 ${e.event_count.toLocaleString()}건 · 마지막 수신 ${fmtRelative(e.last_received_at)}
-          ${e.pending_count > 0 ? ` · <span class="badge warn">대기 ${e.pending_count}</span>` : ''}</div>
-        <div class="url mono"><span>${esc(hookUrl(e.slug))}</span><button class="small" data-action="copy" data-text="${esc(hookUrl(e.slug))}">복사</button></div>
+        <div class="muted" style="font-size:12.5px">${e.event_count.toLocaleString()} webhooks · last received ${fmtRelative(e.last_received_at)}
+          ${e.pending_count > 0 ? ` · <span class="badge warn">Pending ${e.pending_count}</span>` : ''}</div>
+        <div class="url mono"><span>${esc(hookUrl(e.slug))}</span><button class="small" data-action="copy" data-text="${esc(hookUrl(e.slug))}">Copy</button></div>
         <div class="row between actions">
-          <span class="muted" style="font-size:12.5px">목적지 ${e.destinations.length}개로 전달</span>
+          <span class="muted" style="font-size:12.5px">Forwards to ${e.destinations.length} destination(s)</span>
           <div class="row">
-            <button class="small" data-action="show-events" data-id="${e.id}">웹훅 보기</button>
-            <button class="small danger" data-action="delete-endpoint" data-id="${e.id}">삭제</button>
+            <button class="small" data-action="show-events" data-id="${e.id}">View webhooks</button>
+            <button class="small danger" data-action="delete-endpoint" data-id="${e.id}">Delete</button>
           </div>
         </div>
       </div>
@@ -390,24 +390,24 @@ function renderEndpoints() {
               <div class="dest-main">
                 <div class="row"><span class="mono">${esc(d.url)}</span>${destinationBadge(d)}</div>
                 <div class="dest-meta">
-                  <label>재시도 <input class="retry" type="number" min="0" data-retry="${d.id}" value="${d.max_retries ?? ''}" placeholder="무제한"> 회</label>
+                  <label>Retries <input class="retry" type="number" min="0" data-retry="${d.id}" value="${d.max_retries ?? ''}" placeholder="unlimited"></label>
                   <span>·</span>
-                  <span>복구 알림</span><code title="POST ${esc(aliveUrl(d.recover_token))}">POST ${esc(aliveUrl(d.recover_token))}</code>
-                  <button class="small" data-action="copy" data-text="${esc(aliveUrl(d.recover_token))}">복사</button>
+                  <span>Recovery notice</span><code title="POST ${esc(aliveUrl(d.recover_token))}">POST ${esc(aliveUrl(d.recover_token))}</code>
+                  <button class="small" data-action="copy" data-text="${esc(aliveUrl(d.recover_token))}">Copy</button>
                 </div>
               </div>
               <div class="row">
-                ${d.down_since ? `<button class="small" data-action="alive" data-id="${d.id}">살아남 처리</button>` : ''}
-                <button class="small" data-action="toggle-dest" data-id="${d.id}" data-enabled="${d.enabled}">${d.enabled ? '끄기' : '켜기'}</button>
-                <button class="small danger" data-action="delete-dest" data-id="${d.id}">삭제</button>
+                ${d.down_since ? `<button class="small" data-action="alive" data-id="${d.id}">Mark alive</button>` : ''}
+                <button class="small" data-action="toggle-dest" data-id="${d.id}" data-enabled="${d.enabled}">${d.enabled ? 'Disable' : 'Enable'}</button>
+                <button class="small danger" data-action="delete-dest" data-id="${d.id}">Delete</button>
               </div>
             </div>
           </div>`).join('')}
         <div class="branch add">
           <form class="node row" data-action="add-dest" data-id="${e.id}">
             <input class="grow mono" type="url" data-dest-input="${e.id}" placeholder="https://example.com/webhook" required>
-            <label class="muted" style="font-size:12.5px">재시도 <input class="retry" type="number" min="0" name="retries" value="10" placeholder="무제한"> 회</label>
-            <button>목적지 추가</button>
+            <label class="muted" style="font-size:12.5px">Retries <input class="retry" type="number" min="0" name="retries" value="10" placeholder="unlimited"></label>
+            <button>Add destination</button>
           </form>
         </div>
       </div>
@@ -425,7 +425,7 @@ $('#new-endpoint').addEventListener('submit', async (ev) => {
   try {
     await api('/endpoints', { method: 'POST', body: JSON.stringify({ name: form.name.value, slug: form.slug.value || null }) });
     form.reset();
-    toast('엔드포인트를 만들었습니다');
+    toast('Endpoint created');
     await refresh();
   } catch (e) { toast(e.message); }
 });
@@ -442,7 +442,7 @@ $('#endpoint-list').addEventListener('submit', async (ev) => {
       body: JSON.stringify({ url: input.value, max_retries: retries === '' ? null : Number(retries) }),
     });
     input.value = '';
-    toast('목적지를 추가했습니다');
+    toast('Destination added');
     await refresh();
   } catch (e) { toast(e.message); }
 });
@@ -455,11 +455,11 @@ $('#endpoint-list').addEventListener('click', async (ev) => {
     switch (btn.dataset.action) {
       case 'copy':
         await navigator.clipboard.writeText(btn.dataset.text);
-        toast('URL을 복사했습니다');
+        toast('URL copied');
         return;
       case 'alive': {
         const r = await api(`/destinations/${id}/alive`, { method: 'POST' });
-        toast(`보관해 둔 웹훅 ${r.queued}건을 보냅니다`);
+        toast(`Sending ${r.queued} held webhook(s)`);
         break;
       }
       case 'show-events':
@@ -467,17 +467,17 @@ $('#endpoint-list').addEventListener('click', async (ev) => {
         document.querySelector('.tabs button[data-tab="events"]').click();
         return;
       case 'delete-endpoint':
-        if (!confirm('엔드포인트를 삭제할까요? 받은 웹훅 기록과 대기 중인 전달도 함께 지워집니다.')) return;
+        if (!confirm('Delete this endpoint? Its webhook history and pending deliveries will be deleted too.')) return;
         await api(`/endpoints/${id}`, { method: 'DELETE' });
-        toast('엔드포인트를 삭제했습니다');
+        toast('Endpoint deleted');
         break;
       case 'toggle-dest':
         await api(`/destinations/${id}`, { method: 'PATCH', body: JSON.stringify({ enabled: btn.dataset.enabled !== 'true' }) });
         break;
       case 'delete-dest':
-        if (!confirm('목적지를 삭제할까요? 이 목적지로 대기 중인 전달도 함께 지워집니다.')) return;
+        if (!confirm('Delete this destination? Its pending deliveries will be deleted too.')) return;
         await api(`/destinations/${id}`, { method: 'DELETE' });
-        toast('목적지를 삭제했습니다');
+        toast('Destination deleted');
         break;
     }
     await refresh();
@@ -493,7 +493,7 @@ $('#endpoint-list').addEventListener('change', async (ev) => {
       method: 'PATCH',
       body: JSON.stringify({ max_retries: value === '' ? null : Number(value) }),
     });
-    toast(value === '' ? '재시도 횟수: 무제한' : `재시도 횟수: ${value}회`);
+    toast(value === '' ? 'Retries: unlimited' : `Retries: ${value}`);
     input.blur();
     await refresh();
   } catch (e) { toast(e.message); }
@@ -514,7 +514,7 @@ async function loadEvents(append = false) {
   }
   $('#more-events').hidden = page.length < 50;
   $('#event-rows').innerHTML = events.length === 0
-    ? '<tr><td colspan="6" class="empty">받은 웹훅이 없습니다</td></tr>'
+    ? '<tr><td colspan="6" class="empty">No webhooks received</td></tr>'
     : events.map((e) => `
       <tr class="click" data-id="${e.id}">
         <td class="muted">${e.id}</td>
@@ -543,14 +543,14 @@ async function openEvent(id) {
 
 async function loadEventDetail(id) {
   const e = await api(`/events/${id}`);
-  $('#ev-title').textContent = `웹훅 #${e.id} · ${e.endpoint_name}`;
+  $('#ev-title').textContent = `Webhook #${e.id} · ${e.endpoint_name}`;
   $('#ev-meta').textContent = `${e.method} ${e.path || '/'} · ${new Date(e.received_at).toLocaleString('ko-KR')} · ${fmtSize(e.body_size)}`;
-  $('#ev-headers').textContent = e.headers.map(([k, v]) => `${k}: ${v}`).join('\n') || '(없음)';
+  $('#ev-headers').textContent = e.headers.map(([k, v]) => `${k}: ${v}`).join('\n') || '(none)';
   let body = e.body;
   try { body = JSON.stringify(JSON.parse(body), null, 2); } catch {}
-  $('#ev-body').textContent = body || '(비어 있음)';
+  $('#ev-body').textContent = body || '(empty)';
   $('#ev-deliveries').innerHTML = e.deliveries.length === 0
-    ? '<tr><td colspan="5" class="empty">전달할 목적지가 없었습니다</td></tr>'
+    ? '<tr><td colspan="5" class="empty">There were no destinations to deliver to</td></tr>'
     : e.deliveries.map((d) => `
       <tr>
         <td class="mono" style="overflow-wrap:anywhere">${esc(d.url)}</td>
@@ -558,17 +558,17 @@ async function loadEventDetail(id) {
         <td>${d.attempts}</td>
         <td>${d.state === 'delivered'
           ? `<span class="muted">${d.last_status} · ${fmtTime(d.delivered_at)}</span>`
-          : `${d.last_error ? `<span class="error-text">${esc(d.last_error)}</span><br>` : ''}<span class="muted">다음 시도 ${nextAttemptText(d)}</span>`}</td>
+          : `${d.last_error ? `<span class="error-text">${esc(d.last_error)}</span><br>` : ''}<span class="muted">Next attempt ${nextAttemptText(d)}</span>`}</td>
         <td>${d.state !== 'delivered' ? queueButtons(d) : ''}</td>
       </tr>`).join('');
 }
 $('#ev-close').addEventListener('click', () => $('#event-dialog').close());
 $('#event-dialog').addEventListener('close', () => { openEventId = null; });
 $('#ev-replay').addEventListener('click', async () => {
-  if (!confirm('이 웹훅을 현재 켜져 있는 모든 목적지로 다시 보낼까요?')) return;
+  if (!confirm('Resend this webhook to all currently enabled destinations?')) return;
   try {
     const r = await api(`/events/${openEventId}/replay`, { method: 'POST' });
-    toast(`목적지 ${r.destinations}곳으로 다시 보냅니다`);
+    toast(`Resending to ${r.destinations} destination(s)`);
     await refresh();
   } catch (e) { toast(e.message); }
 });
@@ -578,15 +578,15 @@ function queueButtons(d) {
   // 응답 없음 상태인 목적지로는 복구 알림 전까지 보내지 않으므로 재시도 버튼을 두지 않는다
   const retry = d.state === 'pending' && d.destination_down
     ? ''
-    : `<button class="small" data-queue="retry" data-id="${d.id}">${d.state === 'failed' ? '다시 시도' : '지금 재시도'}</button>`;
+    : `<button class="small" data-queue="retry" data-id="${d.id}">${d.state === 'failed' ? 'Retry' : 'Retry now'}</button>`;
   return `<div class="row" style="flex-wrap:nowrap">${retry}
-    <button class="small danger" data-queue="drop" data-id="${d.id}">포기</button></div>`;
+    <button class="small danger" data-queue="drop" data-id="${d.id}">Give up</button></div>`;
 }
 
 async function loadQueue() {
   const rows = await api('/deliveries');
   $('#queue-rows').innerHTML = rows.length === 0
-    ? '<tr><td colspan="8" class="empty">대기 중인 전달이 없습니다</td></tr>'
+    ? '<tr><td colspan="8" class="empty">No pending deliveries</td></tr>'
     : rows.map((d) => `
       <tr>
         <td><a href="#" data-event="${d.event_id}">#${d.event_id}</a></td>
@@ -608,11 +608,11 @@ document.addEventListener('click', async (ev) => {
   try {
     if (btn.dataset.queue === 'retry') {
       await api(`/deliveries/${btn.dataset.id}/retry`, { method: 'POST' });
-      toast('바로 다시 보냅니다');
+      toast('Retrying now');
     } else {
-      if (!confirm('이 전달을 포기할까요? 이 목적지로는 더 이상 보내지 않습니다.')) return;
+      if (!confirm('Give up on this delivery? It will no longer be sent to this destination.')) return;
       await api(`/deliveries/${btn.dataset.id}`, { method: 'DELETE' });
-      toast('전달을 포기했습니다');
+      toast('Delivery abandoned');
     }
     setTimeout(() => refresh().catch(() => {}), 500);
   } catch (e) { toast(e.message); }

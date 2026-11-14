@@ -66,7 +66,7 @@ impl ApiError {
 
 impl From<anyhow::Error> for ApiError {
     fn from(e: anyhow::Error) -> Self {
-        error!("관리 API 오류: {e:#}");
+        error!("admin API error: {e:#}");
         Self(StatusCode::INTERNAL_SERVER_ERROR, "internal error".into())
     }
 }
@@ -106,7 +106,7 @@ struct NewEndpoint {
 async fn create_endpoint(State(s): State<AppState>, Json(body): Json<NewEndpoint>) -> ApiResult {
     let name = body.name.trim().to_string();
     if name.is_empty() {
-        return Err(ApiError::bad_request("이름을 입력하세요"));
+        return Err(ApiError::bad_request("name is required"));
     }
     let slug = match body
         .slug
@@ -120,7 +120,7 @@ async fn create_endpoint(State(s): State<AppState>, Json(body): Json<NewEndpoint
                     .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
             if !valid {
                 return Err(ApiError::bad_request(
-                    "슬러그는 영문, 숫자, -, _ 로 64자 이내여야 합니다",
+                    "slug must be at most 64 characters of letters, digits, - and _",
                 ));
             }
             slug
@@ -128,10 +128,7 @@ async fn create_endpoint(State(s): State<AppState>, Json(body): Json<NewEndpoint
         None => random_hex(12),
     };
     if s.store.slug_exists(slug.clone()).await? {
-        return Err(ApiError(
-            StatusCode::CONFLICT,
-            "이미 있는 슬러그입니다".into(),
-        ));
+        return Err(ApiError(StatusCode::CONFLICT, "slug already exists".into()));
     }
     let endpoint = s.store.create_endpoint(name, slug).await?;
     Ok((StatusCode::CREATED, Json(endpoint)).into_response())
@@ -170,9 +167,7 @@ async fn add_destination(
     match reqwest::Url::parse(&url) {
         Ok(u) if matches!(u.scheme(), "http" | "https") => {}
         _ => {
-            return Err(ApiError::bad_request(
-                "http:// 또는 https:// 로 시작하는 URL을 입력하세요",
-            ));
+            return Err(ApiError::bad_request("URL must start with http:// or https://"));
         }
     }
     let max_retries = body.max_retries.unwrap_or(Some(DEFAULT_MAX_RETRIES));

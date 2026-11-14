@@ -57,7 +57,7 @@ impl Worker {
             {
                 Ok(jobs) => jobs,
                 Err(e) => {
-                    warn!("전달 작업 조회 실패: {e:#}");
+                    warn!("failed to fetch delivery jobs: {e:#}");
                     Vec::new()
                 }
             };
@@ -94,7 +94,7 @@ impl Worker {
             Ok(Some(at)) => Duration::from_millis((at - now_ms()).max(0) as u64).min(MAX_IDLE),
             Ok(None) => MAX_IDLE,
             Err(e) => {
-                warn!("다음 전달 시각 조회 실패: {e:#}");
+                warn!("failed to look up next delivery time: {e:#}");
                 Duration::from_secs(1)
             }
         };
@@ -111,9 +111,14 @@ impl Worker {
         let result = match self.forwarder.send(&job.url, &job.webhook).await {
             Ok(status) => {
                 if attempts > 1 {
-                    info!(delivery = job.delivery_id, attempts, url = %job.url, "재전달 성공");
+                    info!(
+                        delivery = job.delivery_id,
+                        attempts,
+                        url = %job.url,
+                        "redelivery succeeded"
+                    );
                 } else {
-                    debug!(delivery = job.delivery_id, url = %job.url, "전달 성공");
+                    debug!(delivery = job.delivery_id, url = %job.url, "delivered");
                 }
                 self.store
                     .mark_delivered(job.delivery_id, attempts, status)
@@ -124,7 +129,7 @@ impl Worker {
                 warn!(
                     delivery = job.delivery_id,
                     url = %job.url,
-                    "목적지 응답 없음, 복구 알림이 올 때까지 보관: {}",
+                    "destination unreachable, holding until recovery notice: {}",
                     err.message
                 );
                 self.store
@@ -140,7 +145,7 @@ impl Worker {
                         warn!(
                             delivery = job.delivery_id,
                             url = %job.url,
-                            "재시도 {max}회를 다 써서 멈춤: {}",
+                            "gave up after {max} retries: {}",
                             err.message
                         );
                         None
@@ -151,7 +156,7 @@ impl Worker {
                             delivery = job.delivery_id,
                             attempts,
                             url = %job.url,
-                            "전달 실패, {:.1}초 뒤 다시 시도: {}",
+                            "delivery failed, retrying in {:.1}s: {}",
                             delay.as_secs_f32(),
                             err.message
                         );
@@ -172,7 +177,7 @@ impl Worker {
         };
         if let Err(e) = result {
             // 상태를 못 남겨도 잡아 둔 시간이 지나면 다시 보내므로 웹훅은 사라지지 않는다.
-            warn!(delivery = job.delivery_id, "전달 상태 저장 실패: {e:#}");
+            warn!(delivery = job.delivery_id, "failed to save delivery state: {e:#}");
         }
     }
 }
@@ -184,8 +189,8 @@ pub async fn prune_loop(store: Store, retention: Duration) {
         tick.tick().await;
         match store.prune(now_ms() - retention.as_millis() as i64).await {
             Ok(0) => {}
-            Ok(n) => info!("오래된 웹훅 기록 {n}건 정리"),
-            Err(e) => warn!("웹훅 기록 정리 실패: {e:#}"),
+            Ok(n) => info!("pruned {n} old webhook records"),
+            Err(e) => warn!("failed to prune webhook records: {e:#}"),
         }
     }
 }

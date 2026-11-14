@@ -65,4 +65,7 @@ ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
 USER 65532:65532
 VOLUME /data
 EXPOSE 8080
+# scratch 이미지라 curl이 없어서 바이너리가 직접 /healthz를 확인한다.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD ["/usr/local/bin/webhook-buffer", "healthcheck"]
 ENTRYPOINT ["/usr/local/bin/webhook-buffer"]
