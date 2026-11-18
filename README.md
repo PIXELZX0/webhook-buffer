@@ -1,137 +1,137 @@
-<img src="src/logo.svg" width="72" alt="Webhook Buffer 로고">
+<img src="src/logo.svg" width="72" alt="Webhook Buffer logo">
 
 # webhook-buffer
 
-웹훅을 받아서 등록해 둔 목적지들로 그대로 넘겨주는 작은 버퍼 서버입니다.
-목적지가 잠깐 죽어 있거나 에러를 내도 웹훅을 잃어버리지 않도록, 전달에 실패한 웹훅은 저장해 뒀다가 성공할 때까지 다시 보냅니다.
-웹 패널에서 엔드포인트와 목적지를 관리하고 받은 웹훅과 전달 상태를 볼 수 있습니다.
+A small buffer server that receives webhooks and forwards them as-is to the destinations you register.
+So that webhooks aren't lost when a destination is briefly down or returning errors, failed deliveries are stored and retried until they succeed.
+A web panel lets you manage endpoints and destinations and inspect received webhooks and their delivery status.
 
-## 동작 방식
+## How it works
 
-- **엔드포인트**: 웹훅을 받는 주소입니다. `http://서버/h/{slug}` 형태이고, 패널에서 만듭니다.
-- **목적지**: 엔드포인트마다 여러 개 붙일 수 있습니다. 엔드포인트로 들어온 웹훅은 켜져 있는 모든 목적지로 보내집니다.
+- **Endpoint**: The address that receives webhooks, in the form `http://server/h/{slug}`. Created from the panel.
+- **Destination**: Each endpoint can have multiple destinations. A webhook received on an endpoint is sent to every enabled destination.
 
-웹훅 한 건이 들어오면 이렇게 처리합니다.
+When a webhook arrives, it is handled like this:
 
-1. 메서드, 헤더, 본문을 디스크(SQLite)에 먼저 저장하고 보낸 쪽에 `202 Accepted`를 바로 돌려줍니다.
-2. 곧바로 목적지마다 따로 전달합니다. 목적지가 2xx로 응답하면 그 목적지는 끝입니다.
-3. 실패하면 이유에 따라 다르게 처리합니다.
-   - **응답이 아예 없음** (연결 실패, 타임아웃): 다시 보내지 않습니다. 목적지를 "응답 없음" 상태로 바꾸고, 그 뒤로 들어오는 웹훅도 보내지 않고 쌓아 둡니다. 목적지가 [복구 알림](#복구-알림)을 보내면 쌓인 웹훅을 한꺼번에 보냅니다.
-   - **에러 응답** (2xx가 아닌 응답): 목적지마다 정한 재시도 횟수만큼 다시 보냅니다. 간격은 `MIN_BACKOFF_MS`에서 시작해 실패할 때마다 두 배씩 늘어나고 `MAX_BACKOFF_SECS`에서 멈춥니다. 횟수를 다 쓰면 "실패"로 멈추고, 패널에서 다시 시도하거나 포기할 수 있습니다.
+1. The method, headers, and body are first saved to disk (SQLite), and `202 Accepted` is returned to the sender immediately.
+2. It is then delivered to each destination independently. Once a destination responds with 2xx, that destination is done.
+3. Failures are handled differently depending on the cause:
+   - **No response at all** (connection failure, timeout): It is not retried. The destination is marked "unreachable", and webhooks arriving afterwards are queued instead of sent. When the destination sends a [recovery notification](#recovery-notification), all queued webhooks are sent at once.
+   - **Error response** (any non-2xx response): It is retried up to the destination's configured retry count. The interval starts at `MIN_BACKOFF_MS`, doubles on each failure, and caps at `MAX_BACKOFF_SECS`. Once the retries are used up, it stops as "failed", and you can retry or discard it from the panel.
 
-목적지 하나가 죽어 있어도 다른 목적지에는 영향이 없습니다. 먼저 저장하고 나서 보내기 때문에 버퍼 서버가 중간에 죽어도 웹훅은 남아 있고, 다시 켜지면 이어서 보냅니다.
+One destination being down does not affect the others. Because webhooks are saved before being sent, they survive even if the buffer server dies mid-delivery, and delivery resumes when it restarts.
 
-받은 경로 뒤쪽과 쿼리는 목적지 URL 뒤에 붙습니다.
-목적지가 `https://ci.example.com/hook?k=1`일 때 `POST /h/github/push?x=2`로 들어온 웹훅은 `POST https://ci.example.com/hook/push?k=1&x=2`로 갑니다.
+Any trailing path and query string from the received request are appended to the destination URL.
+With a destination of `https://ci.example.com/hook?k=1`, a webhook received as `POST /h/github/push?x=2` is sent to `POST https://ci.example.com/hook/push?k=1&x=2`.
 
-## 실행
+## Running
 
 ```sh
-ADMIN_TOKEN=아무도-모르는-값 cargo run --release
+ADMIN_TOKEN=some-secret-value cargo run --release
 ```
 
-브라우저에서 `http://localhost:8080/`을 열고 `ADMIN_TOKEN`으로 들어가면 됩니다.
-`ADMIN_TOKEN`을 주지 않으면 실행할 때마다 임시 토큰을 만들어 로그에 찍습니다.
+Open `http://localhost:8080/` in a browser and sign in with your `ADMIN_TOKEN`.
+If `ADMIN_TOKEN` is not set, a temporary token is generated on each start and printed to the log.
 
 ### Docker
 
 ```sh
 docker run -d --name webhook-buffer -p 8080:8080 \
-  -e ADMIN_TOKEN=아무도-모르는-값 \
+  -e ADMIN_TOKEN=some-secret-value \
   -v webhook-buffer-data:/data \
   ghcr.io/pixelzx0/webhook-buffer:latest
 ```
 
-DB는 컨테이너 안 `/data`에 저장되니 볼륨을 꼭 붙이세요. 컨테이너는 uid 65532로 돕니다.
-볼륨 대신 호스트 디렉터리를 붙인다면 그 디렉터리를 이 uid가 쓸 수 있어야 합니다.
+The DB is stored at `/data` inside the container, so be sure to mount a volume. The container runs as uid 65532.
+If you mount a host directory instead of a volume, that directory must be writable by this uid.
 
-헬스체크는 `GET /healthz`입니다. 인증 없이 열려 있고, DB가 응답하면 `200 ok`, 아니면 `503`을 돌려줍니다.
-이미지에는 `HEALTHCHECK`가 들어 있어서 `docker ps`에 `healthy`/`unhealthy`로 표시됩니다.
-이미지에 curl이 없기 때문에 바이너리를 `webhook-buffer healthcheck`로 실행해 확인합니다.
+The health check is `GET /healthz`. It requires no authentication and returns `200 ok` if the DB responds, or `503` otherwise.
+The image includes a `HEALTHCHECK`, so `docker ps` shows `healthy`/`unhealthy`.
+Since the image has no curl, the check runs the binary as `webhook-buffer healthcheck`.
 
-이미지는 `master`에 푸시될 때마다 GitHub Actions가 만들어 `ghcr.io`에 올립니다.
-지원 아키텍처는 `linux/amd64`, `arm64`, `arm/v7`, `arm/v6`, `386`, `ppc64le`, `riscv64`, `loong64`, `s390x`입니다.
+Images are built by GitHub Actions on every push to `master` and published to `ghcr.io`.
+Supported architectures: `linux/amd64`, `arm64`, `arm/v7`, `arm/v6`, `386`, `ppc64le`, `riscv64`, `loong64`, `s390x`.
 
-| 태그 | 언제 |
+| Tag | When |
 | --- | --- |
-| `latest` | `master`의 최신 커밋 |
-| `1.2.3`, `1.2`, `1` | `v1.2.3` 태그를 푸시했을 때 |
-| `sha-abc1234` | 커밋마다 |
+| `latest` | Latest commit on `master` |
+| `1.2.3`, `1.2`, `1` | When a `v1.2.3` tag is pushed |
+| `sha-abc1234` | Every commit |
 
-### 리버스 프록시 뒤에 두기
+### Behind a reverse proxy
 
-nginx나 Caddy 같은 리버스 프록시 뒤에 둬도 됩니다. 관리자 토큰이 헤더로 오가니 HTTPS는 프록시에서 처리하는 편이 좋습니다.
-루트(`https://hooks.example.com/`)에 붙여도 되고 하위 경로(`https://example.com/buffer/`)에 붙여도 됩니다.
-하위 경로에 붙일 때는 프록시가 그 접두사를 떼고 넘겨줘야 합니다. 패널에 보이는 웹훅 URL과 복구 알림 URL은 패널을 연 주소를 기준으로 만들어집니다.
+You can run it behind a reverse proxy such as nginx or Caddy. Since the admin token travels in a header, it's best to terminate HTTPS at the proxy.
+It can be mounted at the root (`https://hooks.example.com/`) or under a subpath (`https://example.com/buffer/`).
+When mounting under a subpath, the proxy must strip the prefix before forwarding. The webhook URLs and recovery notification URLs shown in the panel are built from the address the panel was opened at.
 
 ```nginx
 location /buffer/ {
-    proxy_pass http://127.0.0.1:8080/;   # 끝의 /가 접두사를 떼어 줍니다
-    client_max_body_size 10m;            # MAX_BODY_BYTES와 맞추기 (nginx 기본값은 1m)
+    proxy_pass http://127.0.0.1:8080/;   # the trailing / strips the prefix
+    client_max_body_size 10m;            # match MAX_BODY_BYTES (nginx default is 1m)
 }
 ```
 
-- 프록시의 본문 크기 제한이 `MAX_BODY_BYTES`보다 작으면 큰 웹훅은 버퍼에 닿기 전에 막혀서 저장되지 않습니다.
-- 프록시를 거치지 않고 들어오지 못하게 `LISTEN_ADDR=127.0.0.1:8080`(Docker라면 `-p 127.0.0.1:8080:8080`)로 두는 것을 권합니다.
-- 프록시가 붙인 `X-Forwarded-For` 같은 헤더도 다른 헤더처럼 목적지로 그대로 넘어갑니다.
+- If the proxy's body size limit is smaller than `MAX_BODY_BYTES`, large webhooks are rejected before reaching the buffer and are never stored.
+- To prevent bypassing the proxy, setting `LISTEN_ADDR=127.0.0.1:8080` (or `-p 127.0.0.1:8080:8080` with Docker) is recommended.
+- Headers added by the proxy, such as `X-Forwarded-For`, are forwarded to destinations like any other header.
 
-## 복구 알림
+## Recovery notification
 
-목적지마다 고유한 복구 알림 URL이 있습니다. 패널의 목적지 아래에서 복사할 수 있습니다.
+Each destination has its own unique recovery notification URL, which you can copy from under the destination in the panel.
 
 ```sh
-curl -X POST http://버퍼서버/d/{복구토큰}/alive
+curl -X POST http://buffer-server/d/{recovery-token}/alive
 # {"status":"ok","queued":3}
 ```
 
-목적지 서버가 시작할 때 이 URL을 한 번 호출하게 해 두면, 죽어 있는 동안 쌓인 웹훅을 바로 받을 수 있습니다.
-관리자 토큰은 필요 없고 URL 안의 토큰으로 목적지를 구분합니다. GET으로 호출해도 됩니다.
-목적지 서버를 고칠 수 없는 경우에는 패널에서 "Mark alive" 버튼을 누르면 같은 일을 합니다.
+If the destination server calls this URL once on startup, it immediately receives the webhooks that piled up while it was down.
+No admin token is needed; the token in the URL identifies the destination. GET works too.
+If you can't modify the destination server, pressing the "Mark alive" button in the panel does the same thing.
 
-## 웹 패널
+## Web panel
 
-- **요약**: 엔드포인트·목적지 수, 최근 24시간 동안 받은 웹훅과 전달 성공 수, 대기·재시도 중·실패한 전달 수, 응답 없는 목적지 수
-- **Endpoints**: 엔드포인트 추가/삭제, 웹훅 URL 복사, 목적지 추가/삭제/끄기·켜기, 목적지별 재시도 횟수 설정(기본 10회, 비우면 무제한), 목적지 상태(Healthy/Unreachable)와 복구 알림 URL
-- **Recent webhooks**: 받은 웹훅 목록. 하나를 누르면 헤더, 본문, 목적지별 전달 결과(시도 횟수, 응답 코드, 오류)를 볼 수 있고 모든 목적지로 다시 보낼 수도 있습니다.
-- **Retry queue**: 아직 전달하지 못한 목록(재시도 대기, 응답 없어서 보관 중, 재시도 초과로 실패). 다시 시도하거나 포기할 수 있습니다.
+- **Summary**: Number of endpoints and destinations, webhooks received and successful deliveries in the last 24 hours, pending / retrying / failed deliveries, and unreachable destinations
+- **Endpoints**: Add/delete endpoints, copy webhook URLs, add/delete/disable/enable destinations, per-destination retry count (default 10, leave empty for unlimited), destination status (Healthy/Unreachable), and recovery notification URLs
+- **Recent webhooks**: List of received webhooks. Click one to see its headers, body, and per-destination delivery results (attempts, response code, error), and to resend it to all destinations.
+- **Retry queue**: Deliveries not yet completed (waiting to retry, held because the destination is unreachable, failed after exceeding retries). You can retry or discard them.
 
-목적지를 끄면 그 뒤로 들어오는 웹훅은 그 목적지로 보내지 않고, 이미 밀려 있던 전달은 다시 켤 때까지 멈춥니다.
+When a destination is disabled, new webhooks are not sent to it, and deliveries already queued for it are paused until it is re-enabled.
 
-패널이 쓰는 API는 `/api` 아래에 있고 `Authorization: Bearer {ADMIN_TOKEN}` 헤더가 필요합니다.
+The API used by the panel lives under `/api` and requires an `Authorization: Bearer {ADMIN_TOKEN}` header.
 
 ```sh
-# 엔드포인트 만들기 (slug를 빼면 무작위로 만듭니다)
+# Create an endpoint (a random slug is generated if omitted)
 curl -X POST localhost:8080/api/endpoints -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H 'content-type: application/json' -d '{"name":"GitHub","slug":"github"}'
 
-# 목적지 붙이기 (max_retries를 빼면 10회, null이면 무제한)
+# Add a destination (max_retries defaults to 10 if omitted; null means unlimited)
 curl -X POST localhost:8080/api/endpoints/1/destinations -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H 'content-type: application/json' -d '{"url":"https://ci.example.com/hook","max_retries":5}'
 ```
 
-## 설정 (환경 변수)
+## Configuration (environment variables)
 
-| 변수 | 기본값 | 설명 |
+| Variable | Default | Description |
 | --- | --- | --- |
-| `ADMIN_TOKEN` | (임시 생성) | 웹 패널과 관리 API 토큰 |
-| `LISTEN_ADDR` | `0.0.0.0:8080` | 수신 주소 |
-| `DB_PATH` | `webhook-buffer.db` | SQLite 파일. 없으면 상위 디렉터리까지 자동 생성, 디렉터리(`/data/`)를 주면 그 안에 `webhook-buffer.db` 생성 |
-| `REQUEST_TIMEOUT_SECS` | `10` | 목적지 요청 타임아웃 |
-| `MIN_BACKOFF_MS` | `1000` | 첫 재시도까지 대기 시간 |
-| `MAX_BACKOFF_SECS` | `300` | 재시도 간격 최댓값 |
-| `MAX_CONCURRENCY` | `16` | 동시에 보낼 수 있는 최대 요청 수 |
-| `RETENTION_DAYS` | `7` | 다 보낸 웹훅 기록 보관 기간 (아직 못 보낸 것은 지우지 않음) |
-| `MAX_BODY_BYTES` | `10485760` | 받을 수 있는 최대 본문 크기 |
-| `RUST_LOG` | `info` | 로그 레벨 |
+| `ADMIN_TOKEN` | (generated) | Token for the web panel and admin API |
+| `LISTEN_ADDR` | `0.0.0.0:8080` | Listen address |
+| `DB_PATH` | `webhook-buffer.db` | SQLite file. Parent directories are created automatically; if a directory (`/data/`) is given, `webhook-buffer.db` is created inside it |
+| `REQUEST_TIMEOUT_SECS` | `10` | Timeout for requests to destinations |
+| `MIN_BACKOFF_MS` | `1000` | Delay before the first retry |
+| `MAX_BACKOFF_SECS` | `300` | Maximum retry interval |
+| `MAX_CONCURRENCY` | `16` | Maximum number of concurrent outgoing requests |
+| `RETENTION_DAYS` | `7` | How long to keep records of fully delivered webhooks (undelivered ones are never deleted) |
+| `MAX_BODY_BYTES` | `10485760` | Maximum accepted body size |
+| `RUST_LOG` | `info` | Log level |
 
-## 알아둘 점
+## Things to know
 
-- 보낸 쪽은 목적지의 응답을 받지 못하고 항상 `202`를 받습니다. 목적지가 느려도 보낸 쪽이 타임아웃 나지 않게 하려는 것입니다.
-- 2xx가 아니면 모두 에러 응답으로 봅니다. 재시도 횟수를 무제한으로 두면 목적지가 계속 400을 돌려주는 웹훅은 패널에서 포기할 때까지 재시도됩니다.
-- 타임아웃도 "응답 없음"으로 봅니다. 목적지가 느리기만 하고 살아 있어도 복구 알림이 올 때까지 보내지 않으니 `REQUEST_TIMEOUT_SECS`를 넉넉히 잡으세요.
-- 응답 없음 상태는 복구 알림이나 패널의 "Mark alive"로만 풀립니다. 버퍼가 알아서 다시 확인하지는 않습니다.
-- 응답이 없었던 시도는 재시도 횟수에 세지 않습니다.
-- 같은 목적지로 가는 웹훅도 동시에 보내기 때문에 도착 순서가 받은 순서와 다를 수 있습니다.
-- 버퍼 서버가 전달 도중에 죽으면, 다시 켜진 뒤 같은 웹훅을 한 번 더 보낼 수 있습니다(최소 한 번 전달).
-- 리다이렉트(3xx)는 따라가지 않고 실패로 처리합니다.
-- 이전 버전의 `TARGET_URL` 설정은 없어졌습니다. 패널에서 엔드포인트와 목적지를 만들어 주세요.
+- Senders never see the destination's response; they always get `202`. This keeps senders from timing out when a destination is slow.
+- Anything other than 2xx is treated as an error response. With unlimited retries, a webhook that a destination keeps rejecting with 400 is retried until you discard it in the panel.
+- Timeouts also count as "no response". Even if a destination is merely slow but alive, nothing is sent until a recovery notification arrives, so set `REQUEST_TIMEOUT_SECS` generously.
+- The unreachable state is cleared only by a recovery notification or the panel's "Mark alive". The buffer does not re-check on its own.
+- Attempts with no response do not count toward the retry limit.
+- Webhooks to the same destination are sent concurrently, so they may arrive in a different order than they were received.
+- If the buffer server dies mid-delivery, the same webhook may be sent again after restart (at-least-once delivery).
+- Redirects (3xx) are not followed and are treated as failures.
+- The `TARGET_URL` setting from earlier versions has been removed. Create endpoints and destinations from the panel instead.
