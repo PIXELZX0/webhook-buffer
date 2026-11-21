@@ -6,6 +6,31 @@ A small buffer server that receives webhooks and forwards them as-is to the dest
 So that webhooks aren't lost when a destination is briefly down or returning errors, failed deliveries are stored and retried until they succeed.
 A web panel lets you manage endpoints and destinations and inspect received webhooks and their delivery status.
 
+## The problem it solves
+
+Webhooks are fire-and-forget. The sender (GitHub, Stripe, a payment gateway, a CI system…) makes one HTTP request, and if your server is down, restarting, being deployed, or returning errors at that moment, the event is often lost. Many senders retry only a few times over a short window, some not at all, and there is usually no easy way to replay what was missed.
+
+webhook-buffer sits between the sender and your services to close that gap:
+
+- **No lost events during downtime or deploys**: Every webhook is written to disk before the sender gets a response, so it survives both destination outages and buffer restarts.
+- **Fast acknowledgement**: The sender always gets `202` right away, so a slow destination never causes the sender to time out, give up, or disable the webhook.
+- **Catch-up on recovery**: Instead of hammering a dead server, webhooks are held while a destination is unreachable and delivered in one go as soon as it reports that it is back.
+- **Fan-out**: One incoming webhook URL can feed several services, each with its own retry policy and failure isolation.
+- **Visibility**: The panel shows exactly what was received and what happened to each delivery, and lets you resend or discard by hand.
+
+## Tech stack
+
+- **Language**: Rust (2024 edition)
+- **Async runtime**: [Tokio](https://tokio.rs/), with a small fixed worker pool since the workload is almost entirely I/O-bound
+- **HTTP server**: [axum](https://github.com/tokio-rs/axum) for the webhook receiver, admin API, and panel
+- **HTTP client**: [reqwest](https://github.com/seanmonstar/reqwest) with rustls (HTTP/1.1 and HTTP/2) for forwarding to destinations
+- **Storage**: SQLite via [rusqlite](https://github.com/rusqlite/rusqlite) (bundled), in WAL mode with `synchronous = FULL` so accepted webhooks are durable
+- **Serialization**: serde / serde_json
+- **Logging**: tracing / tracing-subscriber (filtered with `RUST_LOG`)
+- **Web panel**: a single dependency-free HTML/CSS/JS page embedded in the binary with `include_str!`
+- **Container**: Multi-arch images cross-compiled with [cargo-zigbuild](https://github.com/rust-cross/cargo-zigbuild), statically linked against musl, and shipped on a `scratch` base (distroless for s390x) running as a non-root user
+- **CI/CD**: GitHub Actions runs `cargo fmt`, `clippy`, and tests, then builds and pushes images to `ghcr.io` with Docker Buildx
+
 ## How it works
 
 - **Endpoint**: The address that receives webhooks, in the form `http://server/h/{slug}`. Created from the panel.
